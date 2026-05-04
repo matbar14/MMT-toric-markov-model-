@@ -26,11 +26,11 @@ class TradingDatasetV3(Dataset):
         self,
         csv_path: str,
         seq_len: int = 64,
-        prediction_horizon: int = 1,  # 1 hour ahead for immediate trading
+        prediction_horizon: int = 4,  # 4 hours ahead to reduce label starvation
         train: bool = True,
         train_split: float = 0.8,
         volume_profile_period: int = 20,
-        min_pattern_profit: float = 0.005,  # 0.5% minimum profit to label as pattern
+        min_pattern_profit: float = 0.003,  # 0.3% minimum profit to label as pattern
         normalization_stats: dict[str, np.ndarray] | None = None,
         aux_target_stats: dict[str, np.ndarray] | None = None,
         return_aux_targets: bool = False,
@@ -59,14 +59,22 @@ class TradingDatasetV3(Dataset):
                 f"Missing columns: {missing_required}"
             )
         
-        # Fill NaN in OI (forward fill from first available value)
+        # Track where OI is truly available and avoid look-ahead imputation.
         if 'open_interest' in df.columns:
-            df['open_interest'] = df['open_interest'].ffill().bfill()
-            df['open_interest_value'] = df['open_interest_value'].ffill().bfill()
+            oi_available = df['open_interest'].notna()
+            if 'open_interest_value' in df.columns:
+                oi_available = oi_available & df['open_interest_value'].notna()
+            df['oi_available'] = oi_available.astype(float)
+            df['open_interest'] = df['open_interest'].ffill().fillna(0.0)
+            if 'open_interest_value' in df.columns:
+                df['open_interest_value'] = df['open_interest_value'].ffill().fillna(0.0)
+            else:
+                df['open_interest_value'] = 0.0
         else:
             # Keep pipeline deterministic even if OI is absent.
             df['open_interest'] = 0.0
             df['open_interest_value'] = 0.0
+            df['oi_available'] = 0.0
         
         # Calculate all indicators
         df = self._add_volume_profile(df)
@@ -86,6 +94,18 @@ class TradingDatasetV3(Dataset):
             df = df.iloc[:split_idx]
         else:
             df = df.iloc[split_idx:]
+        self.oi_available_ratio = float(df['oi_available'].mean()) if 'oi_available' in df.columns else 0.0
+
+        # Keep aligned market data for backtesting to avoid index drift.
+        self.timestamps = (
+            df['timestamp'].reset_index(drop=True)
+            if 'timestamp' in df.columns
+            else pd.Series(range(len(df)))
+        )
+        self.spot_open = df['spot_open'].reset_index(drop=True)
+        self.spot_high = df['spot_high'].reset_index(drop=True)
+        self.spot_low = df['spot_low'].reset_index(drop=True)
+        self.spot_close = df['spot_close'].reset_index(drop=True)
         
         # Extract features and pattern labels
         self.features = self._extract_features(df)
@@ -129,6 +149,7 @@ class TradingDatasetV3(Dataset):
             pattern_counts = self.patterns.sum(axis=0)
             print(f"{'Train' if train else 'Val'} dataset: {len(self)} samples, "
                   f"{self.features.shape[1]} features")
+            print(f"  OI available: {self.oi_available_ratio * 100:.2f}% rows")
             print(f"  CVD Patterns:")
             print(f"    Bullish divergence: {int(pattern_counts[0])}")
             print(f"    Bearish divergence: {int(pattern_counts[1])}")
@@ -249,28 +270,29 @@ class TradingDatasetV3(Dataset):
     
     def _add_open_interest_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add Open Interest features - shows real positions!"""
-        if 'open_interest' not in df.columns:
-            # If no OI data, create dummy features
-            df['oi_change'] = 0
-            df['oi_pct_change'] = 0
-            df['oi_zscore'] = 0
-            df['oi_trend'] = 0
-            df['oi_volume_ratio'] = 1
-            return df
-        
-        # OI change (new positions opened/closed)
-        df['oi_change'] = df['open_interest'].diff()
-        df['oi_pct_change'] = df['open_interest'].pct_change()
-        
-        # OI Z-score (unusual OI levels)
-        df['oi_zscore'] = ((df['open_interest'] - df['open_interest'].rolling(100).mean()) / 
-                           (df['open_interest'].rolling(100).std() + 1e-8))
-        
-        # OI trend
-        df['oi_trend'] = df['open_interest'].diff(5)
-        
-        # OI vs Volume ratio (leverage indicator)
-        df['oi_volume_ratio'] = df['open_interest'] / (df['futures_volume'].rolling(20).mean() + 1e-8)
+        oi = df['open_interest']
+        oi_available = df.get('oi_available', pd.Series(0.0, index=df.index)).astype(float)
+        oi_available_bool = oi_available > 0.5
+
+        # Require contiguous OI history for derivatives to avoid false spikes.
+        oi_diff_valid = oi_available_bool & oi_available_bool.shift(1, fill_value=False)
+        oi_trend_valid = oi_available_bool.rolling(6, min_periods=6).sum().eq(6)
+        oi_zscore_valid = oi_available_bool.rolling(100, min_periods=100).sum().eq(100)
+
+        oi_change = oi.diff().where(oi_diff_valid, 0.0)
+        oi_pct_change = oi.pct_change().replace([np.inf, -np.inf], np.nan).where(oi_diff_valid, 0.0)
+
+        oi_zscore = ((oi - oi.rolling(100).mean()) / (oi.rolling(100).std() + 1e-8)).where(oi_zscore_valid, 0.0)
+        oi_trend = oi.diff(5).where(oi_trend_valid, 0.0)
+        oi_volume_ratio = (
+            oi / (df['futures_volume'].rolling(20).mean() + 1e-8)
+        ).where(oi_available_bool, 0.0)
+
+        df['oi_change'] = oi_change
+        df['oi_pct_change'] = oi_pct_change
+        df['oi_zscore'] = oi_zscore
+        df['oi_trend'] = oi_trend
+        df['oi_volume_ratio'] = oi_volume_ratio
         
         return df
     
@@ -413,7 +435,8 @@ class TradingDatasetV3(Dataset):
         
         # Pattern 12: Accumulation breakout - OI was rising, price flat, NOW breaking up
         price_was_flat = np.abs(df['spot_close'].pct_change(5).shift(2)) < 0.01
-        oi_rising = df['oi_trend'] > 0 if 'open_interest' in df.columns else False
+        oi_context_valid = df.get('oi_available', pd.Series(0.0, index=df.index)).rolling(6, min_periods=6).sum().eq(6)
+        oi_rising = (df['oi_trend'] > 0) & oi_context_valid
         accumulation = (price_was_flat &  # Was flat
                         oi_rising &  # OI was building
                         (price_change_short > 0) &  # NOW breaking up
@@ -508,7 +531,7 @@ class TradingDatasetV3(Dataset):
             'basis_zscore', 'basis_trend', 'basis_extreme',
             
             # OPEN INTEREST (CRITICAL!)
-            'oi_pct_change', 'oi_zscore', 'oi_trend',
+            'oi_pct_change', 'oi_zscore', 'oi_trend', 'oi_volume_ratio', 'oi_available',
             
             # CVD
             'spot_cvd_zscore', 'futures_cvd_zscore',

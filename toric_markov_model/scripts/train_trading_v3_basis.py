@@ -22,8 +22,9 @@ def parse_args():
     parser.add_argument("--dim-angles", type=int, default=64)
     parser.add_argument("--num-states", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=2)
-    parser.add_argument("--prediction-horizon", type=int, default=1)
-    parser.add_argument("--min-pattern-profit", type=float, default=0.005)
+    parser.add_argument("--prediction-horizon", type=int, default=4)
+    parser.add_argument("--min-pattern-profit", type=float, default=0.003)
+    parser.add_argument("--train-split", type=float, default=0.8)
     parser.add_argument("--max-pos-weight", type=float, default=15.0)
     parser.add_argument("--pos-weight-mode", type=str, default="sqrt", choices=["ratio", "sqrt", "log"])
     parser.add_argument("--hold-loss-weight", type=float, default=0.2)
@@ -387,6 +388,7 @@ def main():
         args.seq_len,
         args.prediction_horizon,
         train=True,
+        train_split=args.train_split,
         min_pattern_profit=args.min_pattern_profit,
         return_aux_targets=True,
     )
@@ -397,11 +399,27 @@ def main():
         args.seq_len,
         args.prediction_horizon,
         train=False,
+        train_split=args.train_split,
         min_pattern_profit=args.min_pattern_profit,
         normalization_stats=norm_stats,
         aux_target_stats=aux_stats,
         return_aux_targets=True,
     )
+    train_oi_ratio = train_dataset.oi_available_ratio
+    val_oi_ratio = val_dataset.oi_available_ratio
+    train_oi_patterns = float(train_dataset.patterns[:, 12:14].sum())
+    if train_oi_ratio < 0.01 and val_oi_ratio > 0.05:
+        print(
+            f"WARNING: OI mostly in val split (train={train_oi_ratio*100:.2f}%, val={val_oi_ratio*100:.2f}%). "
+            "Model cannot learn OI patterns reliably. Consider increasing --train-split or collecting longer OI history.",
+            flush=True,
+        )
+    if train_oi_patterns < 1.0:
+        print(
+            "WARNING: zero OI pattern labels in train (accumulation/distribution). "
+            "OI heads/patterns will be undertrained on current split.",
+            flush=True,
+        )
     train_sampler = None
     if not args.disable_balanced_sampler:
         train_sampler, pos_count, neg_count, sampler_pos_weight = build_balanced_sampler(

@@ -102,7 +102,11 @@ def download_binance_futures_data(symbol: str, interval: str, limit: int = 1000)
 
 
 def download_open_interest(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
-    """Download Open Interest history from Binance Futures."""
+    """Download Open Interest history from Binance Futures.
+
+    Binance endpoint `/futures/data/openInterestHist` has an exchange-side limit:
+    only the latest ~30 days of history are available, regardless of requested limit.
+    """
     url = "https://fapi.binance.com/futures/data/openInterestHist"
     all_data = []
     end_time = None
@@ -255,6 +259,12 @@ def main():
     df_oi = download_open_interest(args.symbol, '1h', args.hours)
     if not df_oi.empty:
         print(f"✓ Downloaded {len(df_oi)} OI records", flush=True)
+        if len(df_oi) < args.hours:
+            print(
+                "⚠ OI history is shorter than requested hours. "
+                "Binance openInterestHist provides only the latest ~30 days.",
+                flush=True,
+            )
     else:
         print("⚠ No OI data available", flush=True)
     
@@ -275,6 +285,14 @@ def main():
     print(f"Basis %: {df_1h['basis_pct'].min():.4f}% to {df_1h['basis_pct'].max():.4f}%", flush=True)
     if not df_oi.empty:
         print(f"OI range: {df_1h['open_interest'].min():.2f} to {df_1h['open_interest'].max():.2f}", flush=True)
+        oi_cov = (df_1h['open_interest'].notna() & df_1h['open_interest_value'].notna()).mean() * 100
+        print(f"OI coverage in merged 1h dataset: {oi_cov:.2f}% of rows", flush=True)
+        if oi_cov < 20:
+            print(
+                "⚠ Low OI coverage: train/val split may place almost all OI into validation only. "
+                "Consider training a no-OI baseline and a separate OI-only model.",
+                flush=True,
+            )
     
     print("\nFirst rows:")
     print(df_1h.head(), flush=True)

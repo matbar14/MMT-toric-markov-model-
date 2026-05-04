@@ -30,8 +30,10 @@ def parse_args():
     parser.add_argument("--hold-loss-weight", type=float, default=0.2)
     parser.add_argument("--pattern-threshold", type=float, default=0.45)
     parser.add_argument("--focal-gamma", type=float, default=0.0)
+    parser.add_argument("--binary-focal-gamma", type=float, default=1.0)
     parser.add_argument("--confidence-label-smoothing", type=float, default=0.02)
     parser.add_argument("--aux-loss-weight", type=float, default=0.01)
+    parser.add_argument("--non-hold-loss-weight", type=float, default=1.0)
     parser.add_argument("--disable-balanced-sampler", action="store_true")
     parser.add_argument("--sampler-pos-scale", type=float, default=1.0)
     parser.add_argument("--early-stop-patience", type=int, default=12)
@@ -62,7 +64,8 @@ def build_pos_weight(patterns: torch.Tensor, max_pos_weight: float, mode: str) -
 
 def build_class_weight(num_patterns: int, hold_loss_weight: float) -> torch.Tensor:
     class_weight = torch.ones(num_patterns, dtype=torch.float32)
-    class_weight[-1] = hold_loss_weight
+    if num_patterns >= 17:
+        class_weight[-1] = hold_loss_weight
     return class_weight
 
 
@@ -87,6 +90,26 @@ def focal_bce_with_logits(
     p_t = targets * probs + (1.0 - targets) * (1.0 - probs)
     focal = (1.0 - p_t).pow(gamma)
     return (focal * weighted_bce).mean()
+
+
+def binary_focal_bce_with_logits(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    pos_weight: torch.Tensor,
+    gamma: float,
+) -> torch.Tensor:
+    bce = F.binary_cross_entropy_with_logits(
+        logits,
+        targets,
+        pos_weight=pos_weight,
+        reduction="none",
+    )
+    if gamma <= 0:
+        return bce.mean()
+    probs = torch.sigmoid(logits)
+    p_t = targets * probs + (1.0 - targets) * (1.0 - probs)
+    focal = (1.0 - p_t).pow(gamma)
+    return (focal * bce).mean()
 
 
 def update_non_hold_counts(
@@ -177,14 +200,18 @@ def train_epoch(
     pos_weight,
     class_weight,
     focal_gamma,
+    binary_focal_gamma,
     conf_smoothing,
     aux_loss_weight,
+    non_hold_loss_weight,
+    non_hold_pos_weight,
     pattern_threshold,
 ):
     model.train()
     total_loss = 0
     total_pattern_loss = 0
     total_confidence_loss = 0
+    total_non_hold_loss = 0
     total_return_loss = 0
     total_volume_loss = 0
     total_cvd_loss = 0
@@ -203,26 +230,39 @@ def train_epoch(
         
         outputs = model(features)
         
-        # Pattern detection loss (multi-label binary cross-entropy)
-        pattern_loss = focal_bce_with_logits(
-            outputs['pattern_logits'],
-            patterns,
-            pos_weight=pos_weight,
-            class_weight=class_weight,
-            gamma=focal_gamma,
+        non_hold_targets = (patterns[:, :-1].sum(dim=1, keepdim=True) > 0).float()
+        non_hold_logits = outputs['non_hold_logit']
+        non_hold_loss = binary_focal_bce_with_logits(
+            non_hold_logits,
+            non_hold_targets,
+            pos_weight=non_hold_pos_weight,
+            gamma=binary_focal_gamma,
         )
+
+        # Stage-2 pattern loss: optimize pattern type only on positive (non-hold) samples.
+        non_hold_mask = non_hold_targets.squeeze(1) > 0.5
+        if non_hold_mask.any():
+            pattern_loss = focal_bce_with_logits(
+                outputs['pattern_logits'][non_hold_mask, :-1],
+                patterns[non_hold_mask, :-1],
+                pos_weight=pos_weight,
+                class_weight=class_weight,
+                gamma=focal_gamma,
+            )
+            confidence_targets = patterns[non_hold_mask, :-1] * (1.0 - 2.0 * conf_smoothing) + conf_smoothing
+            confidence_preds = torch.clamp(
+                outputs['pattern_confidence'][non_hold_mask, :-1], min=1e-4, max=1.0 - 1e-4
+            )
+            confidence_loss = F.binary_cross_entropy(confidence_preds, confidence_targets)
+        else:
+            pattern_loss = torch.zeros((), device=device)
+            confidence_loss = torch.zeros((), device=device)
         
         # Confidence head should estimate pattern presence probabilities.
         pattern_probs = torch.sigmoid(outputs['pattern_logits'])
         predicted_patterns = (pattern_probs > pattern_threshold).float()
-        pred_binary = (pattern_probs[:, :-1].max(dim=1).values > pattern_threshold)
-        true_binary = (patterns[:, :-1].sum(dim=1) > 0)
-        confidence_targets = patterns * (1.0 - 2.0 * conf_smoothing) + conf_smoothing
-        confidence_preds = torch.clamp(outputs['pattern_confidence'], min=1e-4, max=1.0 - 1e-4)
-        confidence_loss = F.binary_cross_entropy(
-            confidence_preds,
-            confidence_targets
-        )
+        pred_binary = (torch.sigmoid(non_hold_logits).squeeze(1) > pattern_threshold)
+        true_binary = non_hold_targets.squeeze(1) > 0
         
         # Auxiliary losses on normalized targets.
         return_loss = F.smooth_l1_loss(outputs['predicted_return'], aux_targets[:, 0:1])
@@ -234,7 +274,12 @@ def train_epoch(
         oi_loss = torch.zeros_like(aux_loss)
 
         # Total loss - pattern detection + confidence are primary
-        loss = pattern_loss + 0.5 * confidence_loss + aux_loss_weight * aux_loss
+        loss = (
+            pattern_loss
+            + 0.5 * confidence_loss
+            + non_hold_loss_weight * non_hold_loss
+            + aux_loss_weight * aux_loss
+        )
         
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -244,6 +289,7 @@ def train_epoch(
         total_loss += loss.item()
         total_pattern_loss += pattern_loss.item()
         total_confidence_loss += confidence_loss.item()
+        total_non_hold_loss += non_hold_loss.item()
         total_return_loss += return_loss.item()
         total_volume_loss += volume_loss.item()
         total_cvd_loss += cvd_loss.item()
@@ -260,12 +306,12 @@ def train_epoch(
         
         if (batch_idx + 1) % 10 == 0:
             avg_confidence = outputs['pattern_confidence'].mean().item()
-            print(f"  Batch {batch_idx + 1}/{len(dataloader)}: loss={loss.item():.4f}, pattern={pattern_loss.item():.4f}, conf={confidence_loss.item():.4f}, avg_conf={avg_confidence:.2f}, acc={100 * correct:.2f}%", flush=True)
+            print(f"  Batch {batch_idx + 1}/{len(dataloader)}: loss={loss.item():.4f}, pattern={pattern_loss.item():.4f}, gate={non_hold_loss.item():.4f}, conf={confidence_loss.item():.4f}, avg_conf={avg_confidence:.2f}, acc={100 * correct:.2f}%", flush=True)
     
     n = len(dataloader)
     precision, recall, f1 = non_hold_prf(counts)
     bin_precision, bin_recall, bin_f1 = non_hold_prf(binary_counts)
-    return (total_loss/n, total_pattern_loss/n, total_confidence_loss/n, total_return_loss/n, total_volume_loss/n, 
+    return (total_loss/n, total_pattern_loss/n, total_confidence_loss/n, total_non_hold_loss/n, total_return_loss/n, total_volume_loss/n, 
             total_cvd_loss/n, total_poc_loss/n, total_basis_loss/n, total_oi_loss/n,
             100 * total_correct / total_samples, 100 * precision, 100 * recall, 100 * f1,
             100 * bin_precision, 100 * bin_recall, 100 * bin_f1)
@@ -277,14 +323,18 @@ def validate(
     pos_weight,
     class_weight,
     focal_gamma,
+    binary_focal_gamma,
     conf_smoothing,
     aux_loss_weight,
+    non_hold_loss_weight,
+    non_hold_pos_weight,
     pattern_threshold,
 ):
     model.eval()
     total_loss = 0
     total_pattern_loss = 0
     total_confidence_loss = 0
+    total_non_hold_loss = 0
     total_return_loss = 0
     total_volume_loss = 0
     total_cvd_loss = 0
@@ -306,27 +356,40 @@ def validate(
             
             outputs = model(features)
             
-            pattern_loss = focal_bce_with_logits(
-                outputs['pattern_logits'],
-                patterns,
-                pos_weight=pos_weight,
-                class_weight=class_weight,
-                gamma=focal_gamma,
+            non_hold_targets = (patterns[:, :-1].sum(dim=1, keepdim=True) > 0).float()
+            non_hold_logits = outputs['non_hold_logit']
+            non_hold_loss = binary_focal_bce_with_logits(
+                non_hold_logits,
+                non_hold_targets,
+                pos_weight=non_hold_pos_weight,
+                gamma=binary_focal_gamma,
             )
+
+            non_hold_mask = non_hold_targets.squeeze(1) > 0.5
+            if non_hold_mask.any():
+                pattern_loss = focal_bce_with_logits(
+                    outputs['pattern_logits'][non_hold_mask, :-1],
+                    patterns[non_hold_mask, :-1],
+                    pos_weight=pos_weight,
+                    class_weight=class_weight,
+                    gamma=focal_gamma,
+                )
+                confidence_targets = patterns[non_hold_mask, :-1] * (1.0 - 2.0 * conf_smoothing) + conf_smoothing
+                confidence_preds = torch.clamp(
+                    outputs['pattern_confidence'][non_hold_mask, :-1], min=1e-4, max=1.0 - 1e-4
+                )
+                confidence_loss = F.binary_cross_entropy(confidence_preds, confidence_targets)
+            else:
+                pattern_loss = torch.zeros((), device=device)
+                confidence_loss = torch.zeros((), device=device)
             
             # Confidence head should estimate pattern presence probabilities.
             pattern_probs = torch.sigmoid(outputs['pattern_logits'])
             predicted_patterns = (pattern_probs > pattern_threshold).float()
-            pred_binary = (pattern_probs[:, :-1].max(dim=1).values > pattern_threshold)
-            true_binary = (patterns[:, :-1].sum(dim=1) > 0)
-            all_binary_scores.append(pattern_probs[:, :-1].max(dim=1).values.detach().cpu().numpy())
+            pred_binary = (torch.sigmoid(non_hold_logits).squeeze(1) > pattern_threshold)
+            true_binary = (non_hold_targets.squeeze(1) > 0)
+            all_binary_scores.append(torch.sigmoid(non_hold_logits).squeeze(1).detach().cpu().numpy())
             all_binary_targets.append(true_binary.detach().cpu().numpy().astype(bool))
-            confidence_targets = patterns * (1.0 - 2.0 * conf_smoothing) + conf_smoothing
-            confidence_preds = torch.clamp(outputs['pattern_confidence'], min=1e-4, max=1.0 - 1e-4)
-            confidence_loss = F.binary_cross_entropy(
-                confidence_preds,
-                confidence_targets
-            )
             
             return_loss = F.smooth_l1_loss(outputs['predicted_return'], aux_targets[:, 0:1])
             volume_loss = F.smooth_l1_loss(outputs['predicted_volume_change'], aux_targets[:, 1:2])
@@ -336,11 +399,17 @@ def validate(
             basis_loss = torch.zeros_like(aux_loss)
             oi_loss = torch.zeros_like(aux_loss)
             
-            loss = pattern_loss + 0.5 * confidence_loss + aux_loss_weight * aux_loss
+            loss = (
+                pattern_loss
+                + 0.5 * confidence_loss
+                + non_hold_loss_weight * non_hold_loss
+                + aux_loss_weight * aux_loss
+            )
             
             total_loss += loss.item()
             total_pattern_loss += pattern_loss.item()
             total_confidence_loss += confidence_loss.item()
+            total_non_hold_loss += non_hold_loss.item()
             total_return_loss += return_loss.item()
             total_volume_loss += volume_loss.item()
             total_cvd_loss += cvd_loss.item()
@@ -363,7 +432,7 @@ def validate(
         all_scores,
         all_targets,
     )
-    return (total_loss/n, total_pattern_loss/n, total_confidence_loss/n, total_return_loss/n, total_volume_loss/n,
+    return (total_loss/n, total_pattern_loss/n, total_confidence_loss/n, total_non_hold_loss/n, total_return_loss/n, total_volume_loss/n,
             total_cvd_loss/n, total_poc_loss/n, total_basis_loss/n, total_oi_loss/n,
             100 * total_correct / total_samples, 100 * precision, 100 * recall, 100 * f1,
             100 * bin_precision, 100 * bin_recall, 100 * bin_f1,
@@ -455,17 +524,26 @@ def main():
     num_features = train_dataset.features.shape[1]
     print(f"Features: {num_features}", flush=True)
     pos_weight = build_pos_weight(
-        torch.tensor(train_dataset.patterns, dtype=torch.float32),
+        torch.tensor(train_dataset.patterns[:, :-1], dtype=torch.float32),
         max_pos_weight=args.max_pos_weight,
         mode=args.pos_weight_mode,
     ).to(device)
     class_weight = build_class_weight(
-        num_patterns=train_dataset.patterns.shape[1],
+        num_patterns=train_dataset.patterns.shape[1] - 1,
         hold_loss_weight=args.hold_loss_weight,
     ).to(device)
+    non_hold_targets = (train_dataset.patterns[:, :-1].sum(axis=1) > 0).astype(np.float32)
+    non_hold_pos_count = float(non_hold_targets.sum())
+    non_hold_neg_count = float(len(non_hold_targets) - non_hold_pos_count)
+    non_hold_pos_weight = torch.tensor(
+        [np.clip(non_hold_neg_count / (non_hold_pos_count + 1e-6), 1.0, args.max_pos_weight)],
+        dtype=torch.float32,
+        device=device,
+    )
     print(
-        f"Pos-weight mode={args.pos_weight_mode}, non-hold max={float(pos_weight[:-1].max().item()):.2f}, "
-        f"non-hold mean={float(pos_weight[:-1].mean().item()):.2f}, hold_loss_weight={args.hold_loss_weight:.2f}",
+        f"Pos-weight mode={args.pos_weight_mode}, pattern max={float(pos_weight.max().item()):.2f}, "
+        f"pattern mean={float(pos_weight.mean().item()):.2f}, "
+        f"binary_non_hold_pos_weight={float(non_hold_pos_weight.item()):.2f}",
         flush=True,
     )
     
@@ -507,8 +585,11 @@ def main():
             pos_weight,
             class_weight,
             args.focal_gamma,
+            args.binary_focal_gamma,
             args.confidence_label_smoothing,
             args.aux_loss_weight,
+            args.non_hold_loss_weight,
+            non_hold_pos_weight,
             args.pattern_threshold,
         )
         val_metrics = validate(
@@ -518,57 +599,61 @@ def main():
             pos_weight,
             class_weight,
             args.focal_gamma,
+            args.binary_focal_gamma,
             args.confidence_label_smoothing,
             args.aux_loss_weight,
+            args.non_hold_loss_weight,
+            non_hold_pos_weight,
             args.pattern_threshold,
         )
         
-        scheduler.step(val_metrics[19])
+        scheduler.step(val_metrics[20])
         
         print(f"\nEpoch {epoch + 1} Summary:", flush=True)
         print(
             f"  Train: loss={train_metrics[0]:.4f}, pattern={train_metrics[1]:.4f}, "
-            f"conf={train_metrics[2]:.4f}, acc={train_metrics[9]:.2f}%, "
-            f"non_hold_f1={train_metrics[12]:.2f}% (P={train_metrics[10]:.2f}%, R={train_metrics[11]:.2f}%), "
-            f"binary_non_hold_f1@{args.pattern_threshold:.2f}={train_metrics[15]:.2f}%",
+            f"gate={train_metrics[3]:.4f}, conf={train_metrics[2]:.4f}, acc={train_metrics[10]:.2f}%, "
+            f"non_hold_f1={train_metrics[13]:.2f}% (P={train_metrics[11]:.2f}%, R={train_metrics[12]:.2f}%), "
+            f"binary_non_hold_f1@{args.pattern_threshold:.2f}={train_metrics[16]:.2f}%",
             flush=True,
         )
         print(
             f"  Val:   loss={val_metrics[0]:.4f}, pattern={val_metrics[1]:.4f}, "
-            f"conf={val_metrics[2]:.4f}, acc={val_metrics[9]:.2f}%, "
-            f"non_hold_f1={val_metrics[12]:.2f}% (P={val_metrics[10]:.2f}%, R={val_metrics[11]:.2f}%), "
-            f"binary_non_hold_f1@{args.pattern_threshold:.2f}={val_metrics[15]:.2f}%, "
-            f"best_binary_non_hold_f1={val_metrics[19]:.2f}% at thr={val_metrics[16]:.2f}",
+            f"gate={val_metrics[3]:.4f}, conf={val_metrics[2]:.4f}, acc={val_metrics[10]:.2f}%, "
+            f"non_hold_f1={val_metrics[13]:.2f}% (P={val_metrics[11]:.2f}%, R={val_metrics[12]:.2f}%), "
+            f"binary_non_hold_f1@{args.pattern_threshold:.2f}={val_metrics[16]:.2f}%, "
+            f"best_binary_non_hold_f1={val_metrics[20]:.2f}% at thr={val_metrics[17]:.2f}",
             flush=True,
         )
 
         improved = (
-            val_metrics[19] > best_val_f1 + 1e-4
-            or (abs(val_metrics[19] - best_val_f1) <= 1e-4 and val_metrics[0] < best_val_loss - 1e-4)
+            val_metrics[20] > best_val_f1 + 1e-4
+            or (abs(val_metrics[20] - best_val_f1) <= 1e-4 and val_metrics[0] < best_val_loss - 1e-4)
         )
         if improved:
             best_val_loss = val_metrics[0]
-            best_val_f1 = val_metrics[19]
-            best_val_threshold = val_metrics[16]
+            best_val_f1 = val_metrics[20]
+            best_val_threshold = val_metrics[17]
             patience_counter = 0
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_metrics[0],
-                'val_accuracy': val_metrics[9],
-                'val_non_hold_precision': val_metrics[10],
-                'val_non_hold_recall': val_metrics[11],
-                'val_non_hold_f1': val_metrics[12],
-                'val_binary_non_hold_precision_at_pattern_threshold': val_metrics[13],
-                'val_binary_non_hold_recall_at_pattern_threshold': val_metrics[14],
-                'val_binary_non_hold_f1_at_pattern_threshold': val_metrics[15],
-                'best_val_binary_non_hold_threshold': val_metrics[16],
-                'best_val_binary_non_hold_precision': val_metrics[17],
-                'best_val_binary_non_hold_recall': val_metrics[18],
-                'best_val_binary_non_hold_f1': val_metrics[19],
+                'val_accuracy': val_metrics[10],
+                'val_non_hold_precision': val_metrics[11],
+                'val_non_hold_recall': val_metrics[12],
+                'val_non_hold_f1': val_metrics[13],
+                'val_binary_non_hold_precision_at_pattern_threshold': val_metrics[14],
+                'val_binary_non_hold_recall_at_pattern_threshold': val_metrics[15],
+                'val_binary_non_hold_f1_at_pattern_threshold': val_metrics[16],
+                'best_val_binary_non_hold_threshold': val_metrics[17],
+                'best_val_binary_non_hold_precision': val_metrics[18],
+                'best_val_binary_non_hold_recall': val_metrics[19],
+                'best_val_binary_non_hold_f1': val_metrics[20],
                 'pos_weight': pos_weight.detach().cpu(),
                 'class_weight': class_weight.detach().cpu(),
+                'non_hold_pos_weight': non_hold_pos_weight.detach().cpu(),
                 'normalization': {
                     'feature_mean': torch.tensor(norm_stats['feature_mean'], dtype=torch.float32),
                     'feature_std': torch.tensor(norm_stats['feature_std'], dtype=torch.float32),
@@ -580,7 +665,7 @@ def main():
                 'args': args,
             }, checkpoint_dir / "best_model.pt")
             print(
-                f"  ✓ Saved best model (best_binary_non_hold_f1={val_metrics[19]:.2f}% at thr={val_metrics[16]:.2f}, val_loss={val_metrics[0]:.4f})",
+                f"  ✓ Saved best model (best_binary_non_hold_f1={val_metrics[20]:.2f}% at thr={val_metrics[17]:.2f}, val_loss={val_metrics[0]:.4f})",
                 flush=True,
             )
         else:
@@ -593,19 +678,20 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_metrics[0],
-                'val_accuracy': val_metrics[9],
-                'val_non_hold_precision': val_metrics[10],
-                'val_non_hold_recall': val_metrics[11],
-                'val_non_hold_f1': val_metrics[12],
-                'val_binary_non_hold_precision_at_pattern_threshold': val_metrics[13],
-                'val_binary_non_hold_recall_at_pattern_threshold': val_metrics[14],
-                'val_binary_non_hold_f1_at_pattern_threshold': val_metrics[15],
-                'best_val_binary_non_hold_threshold': val_metrics[16],
-                'best_val_binary_non_hold_precision': val_metrics[17],
-                'best_val_binary_non_hold_recall': val_metrics[18],
-                'best_val_binary_non_hold_f1': val_metrics[19],
+                'val_accuracy': val_metrics[10],
+                'val_non_hold_precision': val_metrics[11],
+                'val_non_hold_recall': val_metrics[12],
+                'val_non_hold_f1': val_metrics[13],
+                'val_binary_non_hold_precision_at_pattern_threshold': val_metrics[14],
+                'val_binary_non_hold_recall_at_pattern_threshold': val_metrics[15],
+                'val_binary_non_hold_f1_at_pattern_threshold': val_metrics[16],
+                'best_val_binary_non_hold_threshold': val_metrics[17],
+                'best_val_binary_non_hold_precision': val_metrics[18],
+                'best_val_binary_non_hold_recall': val_metrics[19],
+                'best_val_binary_non_hold_f1': val_metrics[20],
                 'pos_weight': pos_weight.detach().cpu(),
                 'class_weight': class_weight.detach().cpu(),
+                'non_hold_pos_weight': non_hold_pos_weight.detach().cpu(),
                 'normalization': {
                     'feature_mean': torch.tensor(norm_stats['feature_mean'], dtype=torch.float32),
                     'feature_std': torch.tensor(norm_stats['feature_std'], dtype=torch.float32),

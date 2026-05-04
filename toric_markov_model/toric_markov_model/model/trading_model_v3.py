@@ -106,6 +106,14 @@ class ToricTradingModelV3(nn.Module):
             for _ in range(num_layers)
         ])
         
+        # Complex feature fusion: keep real/imag plus explicit phase/magnitude
+        # while projecting back to 2*dim for downstream heads.
+        self.complex_feature_fusion = nn.Sequential(
+            nn.Linear(5 * dim_angles, 2 * dim_angles),
+            nn.LayerNorm(2 * dim_angles),
+            nn.GELU(),
+        )
+
         # FIX 2: Feature anchor projection for residual connection
         self.feature_anchor = nn.Linear(num_features, 2 * dim_angles)
         
@@ -126,6 +134,14 @@ class ToricTradingModelV3(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(dim_angles, num_patterns),
             nn.Sigmoid(),
+        )
+
+        # Stage-1 gate: hold vs any non-hold pattern
+        self.non_hold_gate_head = nn.Sequential(
+            nn.Linear(2 * dim_angles, dim_angles // 2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(dim_angles // 2, 1),
         )
         
         # AUXILIARY TASKS for multi-task learning (now take 2*dim_angles input)
@@ -246,8 +262,20 @@ class ToricTradingModelV3(nn.Module):
         # Concatenate final hidden states (SAME as original)
         h_concat = torch.cat(h_levels, dim=-1)  # [batch, dim_angles] complex
         
-        # FIX 1: Use BOTH real and imaginary parts - don't lose information!
-        h_out = torch.cat([h_concat.real, h_concat.imag], dim=-1)  # [batch, 2*dim_angles]
+        # FIX 1: Keep all complex information with explicit magnitude + phase.
+        h_magnitude = torch.abs(h_concat)  # [batch, dim_angles]
+        h_phase = torch.angle(h_concat)  # [batch, dim_angles]
+        h_complex_features = torch.cat(
+            [
+                h_concat.real,
+                h_concat.imag,
+                h_magnitude,
+                torch.sin(h_phase),
+                torch.cos(h_phase),
+            ],
+            dim=-1,
+        )  # [batch, 5*dim_angles]
+        h_out = self.complex_feature_fusion(h_complex_features)  # [batch, 2*dim_angles]
         
         # FIX 2: Add residual connection - anchor to original features
         # Get last timestep features as anchor
@@ -261,6 +289,7 @@ class ToricTradingModelV3(nn.Module):
         outputs = {
             'pattern_logits': self.pattern_head(h_out),  # [batch, num_patterns]
             'pattern_confidence': self.confidence_head(h_out),  # [batch, num_patterns]
+            'non_hold_logit': self.non_hold_gate_head(h_out),  # [batch, 1]
         }
         
         if self.predict_return:
@@ -298,6 +327,7 @@ class ToricTradingModelV3(nn.Module):
         pattern_probs = torch.sigmoid(outputs['pattern_logits'])
         pattern_confidence = outputs['pattern_confidence']
         pattern_scores = pattern_probs * pattern_confidence
+        non_hold_prob = torch.sigmoid(outputs['non_hold_logit']).squeeze(1)
 
         # Last label is reserved for "hold"
         hold_idx = self.num_patterns - 1
@@ -322,6 +352,8 @@ class ToricTradingModelV3(nn.Module):
 
         # Multi-label gating: do not force argmax against "hold".
         has_pattern = (
+            (non_hold_prob >= pattern_prob_threshold)
+            & 
             (best_non_hold_prob >= pattern_prob_threshold)
             & (best_non_hold_confidence >= confidence_threshold)
         )
@@ -355,6 +387,7 @@ class ToricTradingModelV3(nn.Module):
             'best_non_hold_prob': best_non_hold_prob,
             'best_non_hold_confidence': best_non_hold_confidence,
             'best_non_hold_score': best_non_hold_score,
+            'non_hold_prob': non_hold_prob,
             'hold_prob': hold_prob,
             'hold_confidence': hold_confidence,
             'hold_score': hold_score,

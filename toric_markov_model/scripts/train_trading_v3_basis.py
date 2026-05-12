@@ -34,6 +34,19 @@ def parse_args():
     parser.add_argument("--confidence-label-smoothing", type=float, default=0.02)
     parser.add_argument("--aux-loss-weight", type=float, default=0.01)
     parser.add_argument("--non-hold-loss-weight", type=float, default=1.0)
+    # Two-stage training
+    parser.add_argument("--stage", type=int, default=0, choices=[0, 1, 2],
+                        help="0=joint, 1=gate-only, 2=pattern-only")
+    parser.add_argument("--resume-from", type=str, default="",
+                        help="Optional checkpoint path to warm-start model weights")
+    parser.add_argument("--train-encoder-in-stage1", action="store_true",
+                        help="If set, stage-1 trains encoder + gate (recommended when training from scratch)")
+    parser.add_argument("--gate-epochs", type=int, default=10,
+                        help="Epochs for stage-1 (gate-only) training")
+    parser.add_argument("--gate-lr", type=float, default=3e-4,
+                        help="Learning rate for gate training")
+    parser.add_argument("--gate-focal-gamma", type=float, default=2.0,
+                        help="Focal gamma for gate (higher = more focus on hard examples)")
     parser.add_argument("--disable-balanced-sampler", action="store_true")
     parser.add_argument("--sampler-pos-scale", type=float, default=1.0)
     parser.add_argument("--early-stop-patience", type=int, default=12)
@@ -191,6 +204,70 @@ def build_balanced_sampler(
     return sampler, pos_count, neg_count, float(pos_weight)
 
 
+def configure_stage_trainability(
+    model: ToricTradingModelV3,
+    stage: int,
+    train_encoder_in_stage1: bool,
+) -> None:
+    """Freeze/unfreeze parameters for requested training stage."""
+    for param in model.parameters():
+        param.requires_grad = False
+
+    if stage == 0:
+        for param in model.parameters():
+            param.requires_grad = True
+        return
+
+    if stage == 1:
+        model.non_hold_gate_head.requires_grad_(True)
+        if train_encoder_in_stage1:
+            model.feature_emb.requires_grad_(True)
+            model.pos_emb.requires_grad_(True)
+            model.markov_chain.requires_grad_(True)
+            model.toric_layers.requires_grad_(True)
+            model.complex_feature_fusion.requires_grad_(True)
+            model.feature_anchor.requires_grad_(True)
+        return
+
+    if stage == 2:
+        model.pattern_head.requires_grad_(True)
+        model.confidence_head.requires_grad_(True)
+        return
+
+    raise ValueError(f"Unsupported stage: {stage}")
+
+
+def stage_loss(
+    stage: int,
+    pattern_loss: torch.Tensor,
+    confidence_loss: torch.Tensor,
+    non_hold_loss: torch.Tensor,
+    aux_loss: torch.Tensor,
+    non_hold_loss_weight: float,
+    aux_loss_weight: float,
+) -> torch.Tensor:
+    """Compute total loss according to stage strategy."""
+    if stage == 1:
+        return non_hold_loss
+    if stage == 2:
+        return pattern_loss + 0.5 * confidence_loss
+    return (
+        pattern_loss
+        + 0.5 * confidence_loss
+        + non_hold_loss_weight * non_hold_loss
+        + aux_loss_weight * aux_loss
+    )
+
+
+def stage_primary_metric(stage: int, val_metrics: tuple[float, ...]) -> tuple[str, float]:
+    """Return checkpoint-selection metric name and value."""
+    if stage == 1:
+        return "best_binary_non_hold_f1", val_metrics[20]
+    if stage == 2:
+        return "non_hold_f1", val_metrics[13]
+    return "best_binary_non_hold_f1", val_metrics[20]
+
+
 def train_epoch(
     model,
     dataloader,
@@ -206,6 +283,7 @@ def train_epoch(
     non_hold_loss_weight,
     non_hold_pos_weight,
     pattern_threshold,
+    stage,
 ):
     model.train()
     total_loss = 0
@@ -273,12 +351,14 @@ def train_epoch(
         basis_loss = torch.zeros_like(aux_loss)
         oi_loss = torch.zeros_like(aux_loss)
 
-        # Total loss - pattern detection + confidence are primary
-        loss = (
-            pattern_loss
-            + 0.5 * confidence_loss
-            + non_hold_loss_weight * non_hold_loss
-            + aux_loss_weight * aux_loss
+        loss = stage_loss(
+            stage=stage,
+            pattern_loss=pattern_loss,
+            confidence_loss=confidence_loss,
+            non_hold_loss=non_hold_loss,
+            aux_loss=aux_loss,
+            non_hold_loss_weight=non_hold_loss_weight,
+            aux_loss_weight=aux_loss_weight,
         )
         
         optimizer.zero_grad(set_to_none=True)
@@ -329,6 +409,7 @@ def validate(
     non_hold_loss_weight,
     non_hold_pos_weight,
     pattern_threshold,
+    stage,
 ):
     model.eval()
     total_loss = 0
@@ -399,11 +480,14 @@ def validate(
             basis_loss = torch.zeros_like(aux_loss)
             oi_loss = torch.zeros_like(aux_loss)
             
-            loss = (
-                pattern_loss
-                + 0.5 * confidence_loss
-                + non_hold_loss_weight * non_hold_loss
-                + aux_loss_weight * aux_loss
+            loss = stage_loss(
+                stage=stage,
+                pattern_loss=pattern_loss,
+                confidence_loss=confidence_loss,
+                non_hold_loss=non_hold_loss,
+                aux_loss=aux_loss,
+                non_hold_loss_weight=non_hold_loss_weight,
+                aux_loss_weight=aux_loss_weight,
             )
             
             total_loss += loss.item()
@@ -561,19 +645,44 @@ def main():
         predict_return=True
     ).to(device)
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
+
+    if args.resume_from:
+        resume_path = Path(args.resume_from)
+        print(f"Loading warm-start checkpoint: {resume_path}", flush=True)
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"], strict=False)
+
+    configure_stage_trainability(
+        model=model,
+        stage=args.stage,
+        train_encoder_in_stage1=args.train_encoder_in_stage1,
+    )
+
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    trainable_count = sum(p.numel() for p in trainable_params)
+    if trainable_count == 0:
+        raise RuntimeError("No trainable parameters after stage configuration.")
+    current_lr = args.gate_lr if args.stage == 1 else args.lr
+    current_binary_focal_gamma = args.gate_focal_gamma if args.stage == 1 else args.binary_focal_gamma
+    print(
+        f"Stage={args.stage} ({'joint' if args.stage == 0 else 'gate-only' if args.stage == 1 else 'pattern-only'}), "
+        f"trainable parameters: {trainable_count:,}, lr={current_lr:.2e}, binary_focal_gamma={current_binary_focal_gamma:.2f}",
+        flush=True,
+    )
+
+    optimizer = torch.optim.AdamW(trainable_params, lr=current_lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=4)
     best_val_loss = float('inf')
     best_val_f1 = -1.0
     best_val_threshold = args.pattern_threshold
     patience_counter = 0
     
-    print(f"\nTraining {args.epochs} epochs...", flush=True)
+    total_epochs = args.gate_epochs if args.stage == 1 else args.epochs
+    print(f"\nTraining {total_epochs} epochs...", flush=True)
     print("=" * 80, flush=True)
     
-    for epoch in range(args.epochs):
-        print(f"\nEpoch {epoch + 1}/{args.epochs}", flush=True)
+    for epoch in range(total_epochs):
+        print(f"\nEpoch {epoch + 1}/{total_epochs}", flush=True)
         print("-" * 80, flush=True)
         
         train_metrics = train_epoch(
@@ -585,12 +694,13 @@ def main():
             pos_weight,
             class_weight,
             args.focal_gamma,
-            args.binary_focal_gamma,
+            current_binary_focal_gamma,
             args.confidence_label_smoothing,
             args.aux_loss_weight,
             args.non_hold_loss_weight,
             non_hold_pos_weight,
             args.pattern_threshold,
+            args.stage,
         )
         val_metrics = validate(
             model,
@@ -599,15 +709,16 @@ def main():
             pos_weight,
             class_weight,
             args.focal_gamma,
-            args.binary_focal_gamma,
+            current_binary_focal_gamma,
             args.confidence_label_smoothing,
             args.aux_loss_weight,
             args.non_hold_loss_weight,
             non_hold_pos_weight,
             args.pattern_threshold,
+            args.stage,
         )
-        
-        scheduler.step(val_metrics[20])
+        metric_name, metric_value = stage_primary_metric(args.stage, val_metrics)
+        scheduler.step(metric_value)
         
         print(f"\nEpoch {epoch + 1} Summary:", flush=True)
         print(
@@ -627,12 +738,12 @@ def main():
         )
 
         improved = (
-            val_metrics[20] > best_val_f1 + 1e-4
-            or (abs(val_metrics[20] - best_val_f1) <= 1e-4 and val_metrics[0] < best_val_loss - 1e-4)
+            metric_value > best_val_f1 + 1e-4
+            or (abs(metric_value - best_val_f1) <= 1e-4 and val_metrics[0] < best_val_loss - 1e-4)
         )
         if improved:
             best_val_loss = val_metrics[0]
-            best_val_f1 = val_metrics[20]
+            best_val_f1 = metric_value
             best_val_threshold = val_metrics[17]
             patience_counter = 0
             torch.save({
@@ -651,6 +762,8 @@ def main():
                 'best_val_binary_non_hold_precision': val_metrics[18],
                 'best_val_binary_non_hold_recall': val_metrics[19],
                 'best_val_binary_non_hold_f1': val_metrics[20],
+                'primary_metric_name': metric_name,
+                'primary_metric_value': metric_value,
                 'pos_weight': pos_weight.detach().cpu(),
                 'class_weight': class_weight.detach().cpu(),
                 'non_hold_pos_weight': non_hold_pos_weight.detach().cpu(),
@@ -663,9 +776,16 @@ def main():
                     'aux_target_std': torch.tensor(aux_stats['aux_target_std'], dtype=torch.float32),
                 },
                 'args': args,
-            }, checkpoint_dir / "best_model.pt")
+            }, checkpoint_dir / f"best_model_stage{args.stage}.pt")
+            if metric_name == "best_binary_non_hold_f1":
+                metric_summary = f"best_binary_non_hold_f1={metric_value:.2f}% at thr={val_metrics[17]:.2f}"
+            else:
+                metric_summary = (
+                    f"{metric_name}={metric_value:.2f}%, "
+                    f"best_binary_non_hold_f1={val_metrics[20]:.2f}% at thr={val_metrics[17]:.2f}"
+                )
             print(
-                f"  ✓ Saved best model (best_binary_non_hold_f1={val_metrics[20]:.2f}% at thr={val_metrics[17]:.2f}, val_loss={val_metrics[0]:.4f})",
+                f"  ✓ Saved best model ({metric_summary}, val_loss={val_metrics[0]:.4f})",
                 flush=True,
             )
         else:
@@ -689,6 +809,8 @@ def main():
                 'best_val_binary_non_hold_precision': val_metrics[18],
                 'best_val_binary_non_hold_recall': val_metrics[19],
                 'best_val_binary_non_hold_f1': val_metrics[20],
+                'primary_metric_name': metric_name,
+                'primary_metric_value': metric_value,
                 'pos_weight': pos_weight.detach().cpu(),
                 'class_weight': class_weight.detach().cpu(),
                 'non_hold_pos_weight': non_hold_pos_weight.detach().cpu(),
@@ -701,15 +823,15 @@ def main():
                     'aux_target_std': torch.tensor(aux_stats['aux_target_std'], dtype=torch.float32),
                 },
                 'args': args,
-            }, checkpoint_dir / f"checkpoint_epoch_{epoch + 1}.pt")
+            }, checkpoint_dir / f"checkpoint_stage{args.stage}_epoch_{epoch + 1}.pt")
 
         if patience_counter >= args.early_stop_patience:
             print(f"\nEarly stopping triggered at epoch {epoch + 1}", flush=True)
             break
     
     print(
-        f"\nDone! Best val loss: {best_val_loss:.4f}, "
-        f"best binary non-hold F1: {best_val_f1:.2f}% at threshold {best_val_threshold:.2f}",
+        f"\nDone! Best val loss: {best_val_loss:.4f}, best stage metric: {best_val_f1:.2f}%, "
+        f"best binary non-hold threshold: {best_val_threshold:.2f}",
         flush=True,
     )
 

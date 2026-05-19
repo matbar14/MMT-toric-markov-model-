@@ -1,0 +1,152 @@
+================================================================================
+V3 MODEL WITH PATTERN DETECTION
+Features: Basis, OI, CVD, Volume Profile
+Patterns: 17 types (CVD, Basis, OI, Volume Profile)
+================================================================================
+Loading data...
+Train dataset: 23491 samples, 28 features
+  OI available: 0.00% rows
+  CVD Patterns:
+    Bullish divergence: 92
+    Bearish divergence: 363
+    CVD reversal bull: 1418
+    CVD reversal bear: 1159
+    CVD exhaustion bull: 43
+    CVD exhaustion bear: 10
+    CVD spot-futures bull: 510
+    CVD spot-futures bear: 401
+    CVD spike bull: 219
+    CVD spike bear: 221
+  Basis Patterns:
+    Basis long: 35
+    Basis short: 62
+  OI Patterns:
+    Accumulation: 0
+    Distribution: 0
+  Volume Profile Patterns:
+    POC breakout up: 123
+    POC breakout down: 149
+  No pattern (hold): 19704
+Val dataset: 2550 samples, 28 features
+  OI available: 0.00% rows
+  CVD Patterns:
+    Bullish divergence: 21
+    Bearish divergence: 40
+    CVD reversal bull: 154
+    CVD reversal bear: 177
+    CVD exhaustion bull: 3
+    CVD exhaustion bear: 2
+    CVD spot-futures bull: 48
+    CVD spot-futures bear: 95
+    CVD spike bull: 16
+    CVD spike bear: 32
+  Basis Patterns:
+    Basis long: 0
+    Basis short: 0
+  OI Patterns:
+    Accumulation: 0
+    Distribution: 0
+  Volume Profile Patterns:
+    POC breakout up: 17
+    POC breakout down: 19
+  No pattern (hold): 2131
+WARNING: zero OI pattern labels in train (accumulation/distribution). OI heads/patterns will be undertrained on current split.
+Balanced sampler: enabled, pos=3839, neg=19652, sample_pos_weight=5.12, pos_scale=1.00
+Features: 28
+Pos-weight mode=sqrt, pattern max=10.00, pattern mean=8.23, binary_non_hold_pos_weight=5.11
+Creating V3 PATTERN DETECTION model...
+Parameters: 198,531
+
+Training 10 epochs...
+================================================================================
+
+Epoch 1/10
+--------------------------------------------------------------------------------
+  Batch 10/734: loss=1.1233, pattern=0.3483, gate=0.4317, conf=0.6809, avg_conf=0.49, acc=24.08%
+  Batch 20/734: loss=1.1122, pattern=0.3191, gate=0.4547, conf=0.6706, avg_conf=0.48, acc=25.18%
+  Batch 30/734: loss=1.0453, pattern=0.3303, gate=0.3834, conf=0.6570, avg_conf=0.48, acc=24.63%
+  Batch 40/734: loss=1.0153, pattern=0.3180, gate=0.3688, conf=0.6528, avg_conf=0.47, acc=24.45%
+  Batch 50/734: loss=1.0062, pattern=0.3089, gate=0.3736, conf=0.6434, avg_conf=0.47, acc=32.17%
+  Batch 60/734: loss=0.9434, pattern=0.2650, gate=0.3643, conf=0.6233, avg_conf=0.46, acc=35.48%
+  Batch 70/734: loss=0.9516, pattern=0.2996, gate=0.3425, conf=0.6132, avg_conf=0.45, acc=41.91%
+  Batch 80/734: loss=0.9434, pattern=0.2821, gate=0.3573, conf=0.6032, avg_conf=0.44, acc=44.49%
+  Batch 90/734: loss=0.9627, pattern=0.2892, gate=0.3776, conf=0.5847, avg_conf=0.43, acc=46.32%
+  Batch 100/734: loss=0.9255, pattern=0.2991, gate=0.3389, conf=0.5685, avg_conf=0.42, acc=50.00%
+  Batch 110/734: loss=1.0363, pattern=0.3591, gate=0.3918, conf=0.5650, avg_conf=0.40, acc=50.55%
+  Batch 120/734: loss=0.9653, pattern=0.2956, gate=0.4030, conf=0.5294, avg_conf=0.39, acc=52.21%
+  Batch 130/734: loss=0.9502, pattern=0.3035, gate=0.3843, conf=0.5217, avg_conf=0.38, acc=52.21%
+  Batch 140/734: loss=0.8891, pattern=0.2659, gate=0.3757, conf=0.4903, avg_conf=0.37, acc=58.82%
+  Batch 150/734: loss=0.8781, pattern=0.2841, gate=0.3497, conf=0.4853, avg_conf=0.35, acc=63.24%
+  Batch 160/734: loss=0.8352, pattern=0.2573, gate=0.3483, conf=0.4541, avg_conf=0.34, acc=59.19%
+  Batch 170/734: loss=0.8508, pattern=0.2723, gate=0.3542, conf=0.4435, avg_conf=0.33, acc=62.32%
+  Batch 180/734: loss=0.8132, pattern=0.2141, gate=0.3884, conf=0.4162, avg_conf=0.31, acc=59.93%
+  Batch 190/734: loss=0.7958, pattern=0.2234, gate=0.3781, conf=0.3851, avg_conf=0.29, acc=65.26%
+  Batch 200/734: loss=0.7927, pattern=0.1994, gate=0.3981, conf=0.3863, avg_conf=0.29, acc=64.71%
+  Batch 210/734: loss=0.8544, pattern=0.2801, gate=0.3677, conf=0.4061, avg_conf=0.27, acc=65.44%
+  Batch 220/734: loss=0.8054, pattern=0.2319, gate=0.3928, conf=0.3557, avg_conf=0.26, acc=66.91%
+  Batch 230/734: loss=0.7866, pattern=0.2308, gate=0.3745, conf=0.3575, avg_conf=0.24, acc=65.81%
+  Batch 240/734: loss=0.7690, pattern=0.2209, gate=0.3712, conf=0.3496, avg_conf=0.24, acc=66.54%
+  Batch 250/734: loss=0.8860, pattern=0.3171, gate=0.3810, conf=0.3690, avg_conf=0.23, acc=64.15%
+  Batch 260/734: loss=0.8623, pattern=0.3005, gate=0.3982, conf=0.3229, avg_conf=0.22, acc=64.15%
+  Batch 270/734: loss=0.8247, pattern=0.2814, gate=0.3805, conf=0.3224, avg_conf=0.21, acc=65.07%
+  Batch 280/734: loss=0.7925, pattern=0.2425, gate=0.3817, conf=0.3290, avg_conf=0.20, acc=65.44%
+  Batch 290/734: loss=0.7592, pattern=0.2427, gate=0.3506, conf=0.3277, avg_conf=0.20, acc=66.73%
+  Batch 300/734: loss=0.8398, pattern=0.2783, gate=0.3931, conf=0.3327, avg_conf=0.19, acc=67.28%
+  Batch 310/734: loss=0.7792, pattern=0.2731, gate=0.3459, conf=0.3136, avg_conf=0.18, acc=65.81%
+  Batch 320/734: loss=0.7955, pattern=0.2823, gate=0.3567, conf=0.3083, avg_conf=0.18, acc=66.73%
+  Batch 330/734: loss=0.8141, pattern=0.2812, gate=0.3691, conf=0.3212, avg_conf=0.18, acc=65.07%
+  Batch 340/734: loss=0.7725, pattern=0.2522, gate=0.3750, conf=0.2844, avg_conf=0.17, acc=66.36%
+  Batch 350/734: loss=0.8596, pattern=0.3230, gate=0.3697, conf=0.3303, avg_conf=0.16, acc=66.54%
+  Batch 360/734: loss=0.7975, pattern=0.2777, gate=0.3678, conf=0.2996, avg_conf=0.16, acc=67.28%
+  Batch 370/734: loss=0.7319, pattern=0.2349, gate=0.3539, conf=0.2816, avg_conf=0.15, acc=67.65%
+  Batch 380/734: loss=0.7239, pattern=0.2587, gate=0.3165, conf=0.2916, avg_conf=0.15, acc=67.65%
+  Batch 390/734: loss=0.7430, pattern=0.2401, gate=0.3581, conf=0.2860, avg_conf=0.15, acc=67.10%
+  Batch 400/734: loss=0.7039, pattern=0.2319, gate=0.3372, conf=0.2639, avg_conf=0.15, acc=67.46%
+  Batch 410/734: loss=0.7791, pattern=0.2483, gate=0.3892, conf=0.2793, avg_conf=0.14, acc=68.38%
+  Batch 420/734: loss=0.7227, pattern=0.2441, gate=0.3338, conf=0.2850, avg_conf=0.15, acc=70.77%
+  Batch 430/734: loss=0.8160, pattern=0.3109, gate=0.3506, conf=0.3033, avg_conf=0.14, acc=64.52%
+  Batch 440/734: loss=0.7471, pattern=0.2617, gate=0.3386, conf=0.2863, avg_conf=0.14, acc=68.20%
+  Batch 450/734: loss=0.7582, pattern=0.2592, gate=0.3675, conf=0.2592, avg_conf=0.14, acc=68.75%
+  Batch 460/734: loss=0.6698, pattern=0.1963, gate=0.3485, conf=0.2458, avg_conf=0.13, acc=70.40%
+  Batch 470/734: loss=0.7153, pattern=0.2257, gate=0.3534, conf=0.2662, avg_conf=0.14, acc=68.38%
+  Batch 480/734: loss=0.7572, pattern=0.2470, gate=0.3749, conf=0.2661, avg_conf=0.14, acc=69.85%
+  Batch 490/734: loss=0.7185, pattern=0.2400, gate=0.3428, conf=0.2650, avg_conf=0.14, acc=69.30%
+  Batch 500/734: loss=0.7484, pattern=0.2725, gate=0.3327, conf=0.2819, avg_conf=0.14, acc=69.85%
+  Batch 510/734: loss=0.8338, pattern=0.3067, gate=0.3639, conf=0.3206, avg_conf=0.14, acc=66.54%
+  Batch 520/734: loss=0.7874, pattern=0.2641, gate=0.3758, conf=0.2859, avg_conf=0.14, acc=67.83%
+  Batch 530/734: loss=0.7916, pattern=0.2916, gate=0.3480, conf=0.2995, avg_conf=0.13, acc=65.62%
+  Batch 540/734: loss=0.6927, pattern=0.2192, gate=0.3461, conf=0.2494, avg_conf=0.13, acc=68.38%
+  Batch 550/734: loss=0.7493, pattern=0.2459, gate=0.3649, conf=0.2720, avg_conf=0.13, acc=67.65%
+  Batch 560/734: loss=0.6874, pattern=0.2045, gate=0.3591, conf=0.2412, avg_conf=0.13, acc=70.40%
+  Batch 570/734: loss=0.7835, pattern=0.2700, gate=0.3743, conf=0.2729, avg_conf=0.13, acc=67.46%
+  Batch 580/734: loss=0.7308, pattern=0.2304, gate=0.3688, conf=0.2556, avg_conf=0.13, acc=67.10%
+  Batch 590/734: loss=0.7770, pattern=0.2955, gate=0.3285, conf=0.3007, avg_conf=0.13, acc=68.57%
+  Batch 600/734: loss=0.6760, pattern=0.2001, gate=0.3422, conf=0.2617, avg_conf=0.13, acc=69.12%
+  Batch 610/734: loss=0.7664, pattern=0.2709, gate=0.3540, conf=0.2758, avg_conf=0.13, acc=67.10%
+  Batch 620/734: loss=0.8102, pattern=0.2836, gate=0.3701, conf=0.3069, avg_conf=0.13, acc=68.01%
+  Batch 630/734: loss=0.6925, pattern=0.2372, gate=0.3235, conf=0.2576, avg_conf=0.13, acc=68.38%
+  Batch 640/734: loss=0.6626, pattern=0.2137, gate=0.3139, conf=0.2620, avg_conf=0.13, acc=69.30%
+  Batch 650/734: loss=0.7464, pattern=0.2471, gate=0.3569, conf=0.2798, avg_conf=0.13, acc=68.93%
+  Batch 660/734: loss=0.8237, pattern=0.3034, gate=0.3755, conf=0.2838, avg_conf=0.13, acc=66.73%
+  Batch 670/734: loss=0.7848, pattern=0.2728, gate=0.3647, conf=0.2892, avg_conf=0.13, acc=68.38%
+  Batch 680/734: loss=0.6794, pattern=0.2130, gate=0.3399, conf=0.2487, avg_conf=0.13, acc=67.65%
+  Batch 690/734: loss=0.7647, pattern=0.2514, gate=0.3837, conf=0.2547, avg_conf=0.13, acc=70.22%
+  Batch 700/734: loss=0.7587, pattern=0.2667, gate=0.3577, conf=0.2632, avg_conf=0.13, acc=70.59%
+  Batch 710/734: loss=0.6901, pattern=0.2071, gate=0.3560, conf=0.2481, avg_conf=0.13, acc=68.93%
+  Batch 720/734: loss=0.7140, pattern=0.2161, gate=0.3725, conf=0.2475, avg_conf=0.13, acc=71.14%
+  Batch 730/734: loss=0.6852, pattern=0.2022, gate=0.3528, conf=0.2529, avg_conf=0.14, acc=72.06%
+
+Epoch 1 Summary:
+  Train: loss=0.8131, pattern=0.2627, gate=0.3661, conf=0.3633, acc=61.81%, non_hold_f1=14.27% (P=7.83%, R=80.08%), binary_non_hold_f1@0.45=66.70%
+  Val:   loss=0.7704, pattern=0.2309, gate=0.4060, conf=0.2621, acc=67.52%, non_hold_f1=7.54% (P=3.95%, R=82.56%), binary_non_hold_f1@0.45=31.47%, best_binary_non_hold_f1=31.47% at thr=0.01
+  ✓ Saved best model (best_binary_non_hold_f1=31.47% at thr=0.01, val_loss=0.7704)
+
+Epoch 2/10
+--------------------------------------------------------------------------------
+  Batch 10/734: loss=0.7346, pattern=0.2279, gate=0.3579, conf=0.2900, avg_conf=0.13, acc=70.77%
+  Batch 20/734: loss=0.7129, pattern=0.2185, gate=0.3691, conf=0.2443, avg_conf=0.13, acc=68.20%
+  Batch 30/734: loss=0.7474, pattern=0.2648, gate=0.3409, conf=0.2795, avg_conf=0.13, acc=69.67%
+  Batch 40/734: loss=0.7300, pattern=0.2092, gate=0.3920, conf=0.2516, avg_conf=0.13, acc=67.83%
+  Batch 50/734: loss=0.7754, pattern=0.2696, gate=0.3599, conf=0.2869, avg_conf=0.13, acc=68.38%
+  Batch 60/734: loss=0.7022, pattern=0.2330, gate=0.3396, conf=0.2537, avg_conf=0.13, acc=68.93%
+  Batch 70/734: loss=0.7566, pattern=0.2454, gate=0.3656, conf=0.2852, avg_conf=0.13, acc=65.99%

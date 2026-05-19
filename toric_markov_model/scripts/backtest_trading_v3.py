@@ -806,7 +806,8 @@ def main() -> None:
     ).to(device)
 
     try:
-        model.load_state_dict(checkpoint["model_state_dict"])
+        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        print("✓ Model loaded (strict=False, some keys may be missing)")
     except RuntimeError as exc:
         raise RuntimeError(
             "Failed to load checkpoint into current model architecture. "

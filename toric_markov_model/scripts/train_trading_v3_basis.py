@@ -50,6 +50,9 @@ def parse_args():
     parser.add_argument("--disable-balanced-sampler", action="store_true")
     parser.add_argument("--sampler-pos-scale", type=float, default=1.0)
     parser.add_argument("--early-stop-patience", type=int, default=12)
+    parser.add_argument("--stage1-early-stop-patience", type=int, default=4)
+    parser.add_argument("--metric-min-delta", type=float, default=0.05,
+                        help="Minimum metric improvement (percentage points) to reset patience")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
@@ -676,6 +679,7 @@ def main():
     best_val_f1 = -1.0
     best_val_threshold = args.pattern_threshold
     patience_counter = 0
+    patience_limit = args.stage1_early_stop_patience if args.stage == 1 else args.early_stop_patience
     
     total_epochs = args.gate_epochs if args.stage == 1 else args.epochs
     print(f"\nTraining {total_epochs} epochs...", flush=True)
@@ -738,8 +742,11 @@ def main():
         )
 
         improved = (
-            metric_value > best_val_f1 + 1e-4
-            or (abs(metric_value - best_val_f1) <= 1e-4 and val_metrics[0] < best_val_loss - 1e-4)
+            metric_value > best_val_f1 + args.metric_min_delta
+            or (
+                abs(metric_value - best_val_f1) <= args.metric_min_delta
+                and val_metrics[0] < best_val_loss - 1e-4
+            )
         )
         if improved:
             best_val_loss = val_metrics[0]
@@ -790,7 +797,7 @@ def main():
             )
         else:
             patience_counter += 1
-            print(f"  • No improvement ({patience_counter}/{args.early_stop_patience})", flush=True)
+            print(f"  • No improvement ({patience_counter}/{patience_limit})", flush=True)
         
         if (epoch + 1) % 10 == 0:
             torch.save({
@@ -825,7 +832,7 @@ def main():
                 'args': args,
             }, checkpoint_dir / f"checkpoint_stage{args.stage}_epoch_{epoch + 1}.pt")
 
-        if patience_counter >= args.early_stop_patience:
+        if patience_counter >= patience_limit:
             print(f"\nEarly stopping triggered at epoch {epoch + 1}", flush=True)
             break
     

@@ -11,10 +11,38 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+try:
+    import joblib
+except ImportError:  # pragma: no cover - optional dependency for gate baseline
+    joblib = None
 
 from toric_markov_model.data.trading_dataset_v3 import TradingDatasetV3
 from toric_markov_model.model.trading_model_v3 import ToricTradingModelV3
 from toric_markov_model.train import select_device
+
+
+def build_gate_feature_row(seq: np.ndarray, windows: tuple[int, ...], lags: tuple[int, ...]) -> np.ndarray:
+    """Build tabular gate features from normalized sequence features."""
+    if seq.ndim != 2:
+        raise ValueError(f"Expected 2D sequence [seq_len, features], got shape={seq.shape}")
+    seq_len, num_features = seq.shape
+    parts: list[np.ndarray] = [seq[-1]]
+
+    for lag in lags:
+        if lag <= seq_len:
+            parts.append(seq[-lag])
+        else:
+            parts.append(np.zeros(num_features, dtype=np.float32))
+
+    for w in windows:
+        w_eff = min(w, seq_len)
+        chunk = seq[-w_eff:]
+        parts.append(chunk.mean(axis=0))
+        parts.append(chunk.std(axis=0))
+        parts.append(chunk.min(axis=0))
+        parts.append(chunk.max(axis=0))
+
+    return np.concatenate(parts, axis=0).astype(np.float32, copy=False)
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,15 +53,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-split", type=float, default=None, help="Override train/val split used inside dataset")
     parser.add_argument("--initial-capital", type=float, default=10000, help="Initial capital")
     parser.add_argument("--position-size", type=float, default=0.95, help="Fraction of capital per trade")
-    parser.add_argument("--transaction-cost", type=float, default=0.001, help="Transaction cost (0.1%)")
+    parser.add_argument("--transaction-cost", type=float, default=0.001, help="Transaction cost (0.1%%)")
     parser.add_argument("--confidence-threshold", type=float, default=0.50, help="Min confidence to trade (0.0-1.0)")
     parser.add_argument("--pattern-prob-threshold", type=float, default=0.30, help="Min pattern probability to treat signal as valid")
     parser.add_argument("--signal-threshold", type=float, default=0.22, help="Min (probability * confidence) score for entry")
     parser.add_argument("--use-checkpoint-pattern-threshold", action="store_true", help="Use best_val_binary_non_hold_threshold from checkpoint as pattern-prob-threshold")
     parser.add_argument("--cooldown-bars", type=int, default=1, help="Bars to wait after closing position")
     parser.add_argument("--max-hold-bars", type=int, default=96, help="Force-close position after N bars (0 to disable)")
-    parser.add_argument("--take-profit", type=float, default=0.02, help="Take profit percentage (default 2%)")
-    parser.add_argument("--stop-loss", type=float, default=0.01, help="Stop loss percentage (default 1%)")
+    parser.add_argument("--take-profit", type=float, default=0.02, help="Take profit percentage (default 2%%)")
+    parser.add_argument("--stop-loss", type=float, default=0.01, help="Stop loss percentage (default 1%%)")
     parser.add_argument("--intrabar-priority", type=str, default="stop_first", choices=["stop_first", "take_first"], help="If both TP and SL hit in same bar")
     parser.add_argument("--enable-short", action="store_true", help="Enable short entries on bearish patterns")
     parser.add_argument("--dynamic-position-sizing", action="store_true", help="Use ret/vol heads to adapt position size")
@@ -47,6 +75,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold-step", type=float, default=0.05, help="Threshold step for optimization")
     parser.add_argument("--optimization-metric", type=str, default="profit_factor", choices=["profit_factor", "total_return", "mar"], help="Metric used for threshold optimization")
     parser.add_argument("--min-round-trips-for-optimization", type=int, default=5, help="Ignore thresholds with fewer completed trades")
+    parser.add_argument("--gate-baseline-model", type=str, default="", help="Optional sklearn gate baseline .pkl path (hold vs non-hold filter)")
+    parser.add_argument("--gate-baseline-meta", type=str, default="", help="Optional gate meta .json path (windows/lags/threshold)")
+    parser.add_argument("--gate-baseline-threshold", type=float, default=None, help="Override gate threshold. If omitted, uses meta val_best_threshold or 0.50")
     parser.add_argument("--output", type=str, default="backtest_results_v3.csv", help="Output CSV path")
     return parser.parse_args()
 
@@ -88,6 +119,10 @@ class TradingBacktest:
         size_edge_scale: float = 3.0,
         size_vol_scale: float = 1.5,
         bars_per_year: float = 24 * 365,
+        gate_baseline_model: Any | None = None,
+        gate_baseline_threshold: float = 0.50,
+        gate_windows: tuple[int, ...] = (3, 5, 10),
+        gate_lags: tuple[int, ...] = (1, 2, 3),
     ):
         self.model = model
         self.initial_capital = float(initial_capital)
@@ -107,6 +142,11 @@ class TradingBacktest:
         self.size_edge_scale = float(size_edge_scale)
         self.size_vol_scale = float(size_vol_scale)
         self.bars_per_year = float(bars_per_year)
+        self.gate_baseline_model = gate_baseline_model
+        self.gate_baseline_threshold = float(gate_baseline_threshold)
+        self.gate_windows = tuple(int(x) for x in gate_windows)
+        self.gate_lags = tuple(int(x) for x in gate_lags)
+        self.last_run_counters: dict[str, float] = {}
 
         self.reset()
 
@@ -165,6 +205,15 @@ class TradingBacktest:
 
         min_size = float(np.clip(self.min_position_size, 0.0, base))
         return float(np.clip(scaled, min_size, base))
+
+    def _gate_probability(self, features_seq: torch.Tensor) -> float:
+        """Predict non-hold probability from external tabular gate baseline."""
+        if self.gate_baseline_model is None:
+            return 1.0
+        seq_np = features_seq.detach().cpu().numpy().astype(np.float32, copy=False)
+        gate_row = build_gate_feature_row(seq_np, windows=self.gate_windows, lags=self.gate_lags)
+        prob = self.gate_baseline_model.predict_proba(gate_row.reshape(1, -1))[0, 1]
+        return float(prob)
 
     def _open_position(
         self,
@@ -306,6 +355,11 @@ class TradingBacktest:
         print(f"Cooldown bars after exit: {self.cooldown_bars}")
         print(f"Short enabled: {self.enable_short}")
         print(f"Dynamic position sizing: {self.dynamic_position_sizing}")
+        if self.gate_baseline_model is not None:
+            print(
+                "External gate baseline: enabled "
+                f"(threshold={self.gate_baseline_threshold:.2f}, windows={self.gate_windows}, lags={self.gate_lags})"
+            )
         if self.max_hold_bars > 0:
             print(f"Max hold bars: {self.max_hold_bars}")
 
@@ -316,7 +370,11 @@ class TradingBacktest:
             "skipped_cooldown": 0,
             "skipped_bearish": 0,
             "skipped_low_score": 0,
+            "skipped_gate": 0,
+            "gate_evaluated": 0,
+            "gate_passed": 0,
         }
+        gate_prob_sum = 0.0
 
         last_timestamp: Any | None = None
         last_close_price: float | None = None
@@ -355,10 +413,29 @@ class TradingBacktest:
                         f"Trades={len(self.trades)}, "
                         f"Position={side_name}"
                     )
+                    print(
+                        "    Counters: "
+                        f"opened={counters['opened']}, "
+                        f"signals={counters['signals_detected']}, "
+                        f"skip_gate={counters['skipped_gate']}, "
+                        f"skip_low_score={counters['skipped_low_score']}, "
+                        f"skip_no_pattern={counters['skipped_no_pattern']}"
+                    )
                 continue
 
-            features, _ = dataset[i]
-            features = features.unsqueeze(0).to(device)
+            features_cpu, _ = dataset[i]
+            gate_prob = 1.0
+            if self.gate_baseline_model is not None:
+                gate_prob = self._gate_probability(features_cpu)
+                counters["gate_evaluated"] += 1
+                gate_prob_sum += gate_prob
+                if gate_prob < self.gate_baseline_threshold:
+                    counters["skipped_gate"] += 1
+                    self._record_portfolio(timestamp, close_price)
+                    continue
+                counters["gate_passed"] += 1
+
+            features = features_cpu.unsqueeze(0).to(device)
 
             with torch.no_grad():
                 result = self.model.detect_patterns(
@@ -424,10 +501,18 @@ class TradingBacktest:
                     f"Trades={len(self.trades)}, "
                     f"Position={side_name}"
                 )
+                print(
+                    "    Counters: "
+                    f"opened={counters['opened']}, "
+                    f"signals={counters['signals_detected']}, "
+                    f"skip_gate={counters['skipped_gate']}, "
+                    f"skip_low_score={counters['skipped_low_score']}, "
+                    f"skip_no_pattern={counters['skipped_no_pattern']}"
+                )
                 if has_pattern:
                     print(
                         f"    Last pattern: {pattern_name} "
-                        f"(prob={best_prob:.2f}, conf={best_confidence:.2f}, score={best_score:.2f}, hold_score={hold_score:.2f})"
+                        f"(prob={best_prob:.2f}, conf={best_confidence:.2f}, score={best_score:.2f}, hold_score={hold_score:.2f}, gate_prob={gate_prob:.2f})"
                     )
 
         if self.position_side != 0 and last_timestamp is not None and last_close_price is not None:
@@ -440,9 +525,21 @@ class TradingBacktest:
         print(f"Skipped bearish patterns (short disabled): {counters['skipped_bearish']}")
         print(f"Skipped low-score signals: {counters['skipped_low_score']}")
         print(f"Skipped with no pattern: {counters['skipped_no_pattern']}")
+        if self.gate_baseline_model is not None:
+            avg_gate_prob = gate_prob_sum / max(counters["gate_evaluated"], 1)
+            print(f"Skipped by external gate: {counters['skipped_gate']}")
+            print(
+                f"Gate pass rate: {100.0 * counters['gate_passed'] / max(counters['gate_evaluated'], 1):.2f}% "
+                f"(avg_prob={avg_gate_prob:.3f})"
+            )
         print(f"Total trade events: {len(self.trades)}")
+        self.last_run_counters = {k: float(v) for k, v in counters.items()}
+        if self.gate_baseline_model is not None:
+            self.last_run_counters["gate_avg_prob"] = float(gate_prob_sum / max(counters["gate_evaluated"], 1))
 
-        return self.get_metrics()
+        metrics = self.get_metrics()
+        metrics.update({f"counter_{k}": float(v) for k, v in self.last_run_counters.items()})
+        return metrics
 
     def get_metrics(self) -> dict[str, float]:
         """Calculate performance metrics, including profit factor."""
@@ -585,6 +682,50 @@ def threshold_grid_search(
     return best_threshold, best_metrics, scan_df
 
 
+def load_gate_baseline_components(
+    model_path: str,
+    meta_path: str,
+    threshold_override: float | None,
+) -> tuple[Any | None, tuple[int, ...], tuple[int, ...], float]:
+    """Load optional external gate baseline and config."""
+    if not model_path:
+        return None, (3, 5, 10), (1, 2, 3), 0.50
+    if joblib is None:
+        raise RuntimeError("joblib is required for --gate-baseline-model, but it is not installed.")
+
+    model_file = Path(model_path)
+    gate_model = joblib.load(model_file)
+
+    meta: dict[str, Any] = {}
+    if meta_path:
+        meta_file = Path(meta_path)
+    else:
+        meta_file = model_file.parent / "gate_baseline_meta.json"
+        if not meta_file.exists():
+            stem_guess = model_file.with_name(f"{model_file.stem}_meta.json")
+            meta_file = stem_guess if stem_guess.exists() else meta_file
+
+    if meta_file.exists():
+        with open(meta_file, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        print(f"Loaded gate baseline meta: {meta_file}")
+    else:
+        print("Gate baseline meta not found; using default windows/lags/threshold")
+
+    windows = tuple(int(x) for x in meta.get("windows", [3, 5, 10]))
+    lags = tuple(int(x) for x in meta.get("lags", [1, 2, 3]))
+    if threshold_override is not None:
+        threshold = float(threshold_override)
+    else:
+        threshold = float(meta.get("val_best_threshold", 0.50))
+
+    print(
+        f"Loaded gate baseline model: {model_file} "
+        f"(threshold={threshold:.2f}, windows={windows}, lags={lags})"
+    )
+    return gate_model, windows, lags, threshold
+
+
 def main() -> None:
     args = parse_args()
     device = select_device(args.device)
@@ -688,6 +829,12 @@ def main() -> None:
     print("\nRunning backtest...")
     print("=" * 80)
 
+    gate_model, gate_windows, gate_lags, gate_threshold = load_gate_baseline_components(
+        model_path=args.gate_baseline_model,
+        meta_path=args.gate_baseline_meta,
+        threshold_override=args.gate_baseline_threshold,
+    )
+
     backtest_kwargs: dict[str, Any] = {
         "model": model,
         "initial_capital": args.initial_capital,
@@ -706,6 +853,10 @@ def main() -> None:
         "size_edge_scale": args.size_edge_scale,
         "size_vol_scale": args.size_vol_scale,
         "bars_per_year": args.bars_per_year,
+        "gate_baseline_model": gate_model,
+        "gate_baseline_threshold": gate_threshold,
+        "gate_windows": gate_windows,
+        "gate_lags": gate_lags,
     }
 
     metrics: dict[str, float]

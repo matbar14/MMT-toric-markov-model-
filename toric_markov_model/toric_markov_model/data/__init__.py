@@ -6,6 +6,8 @@ from torch.utils.data import DataLoader
 
 from .dataset import RandomTokenDataset, TextDataset
 from .tokenizer import SimpleTokenizer
+from .trading_dataset_v3 import TradingDatasetV3
+from .trading_dataset_v3_enhanced import TradingDatasetV3Enhanced
 
 
 def create_dataloader(
@@ -36,4 +38,6 @@ __all__ = [
     "RandomTokenDataset",
     "TextDataset",
     "create_dataloader",
+    "TradingDatasetV3",
+    "TradingDatasetV3Enhanced",
 ]

@@ -33,6 +33,9 @@ class TradingDatasetV3Enhanced(TradingDatasetV3):
         # New parameters for temporal features
         rolling_windows: list[int] | None = None,
         lag_periods: list[int] | None = None,
+        split: str | None = None,
+        validation_split: float = 0.1,
+        split_boundaries: dict[str, str] | None = None,
     ):
         self.rolling_windows = rolling_windows or [3, 5, 10]
         self.lag_periods = lag_periods or [1, 2, 3]
@@ -50,6 +53,9 @@ class TradingDatasetV3Enhanced(TradingDatasetV3):
             aux_target_stats=aux_target_stats,
             return_aux_targets=return_aux_targets,
             verbose=verbose,
+            split=split,
+            validation_split=validation_split,
+            split_boundaries=split_boundaries,
         )
     
     def _extract_features(self, df: pd.DataFrame) -> np.ndarray:
@@ -180,6 +186,7 @@ class TradingDatasetV3Enhanced(TradingDatasetV3):
             temporal_cols.append(col_name)
         
         # Extract temporal features
+        self.feature_names += temporal_cols
         features = df[temporal_cols].fillna(0).values
         features = np.nan_to_num(features, nan=0.0, posinf=3.0, neginf=-3.0)
         

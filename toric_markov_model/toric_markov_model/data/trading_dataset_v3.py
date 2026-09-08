@@ -35,7 +35,24 @@ class TradingDatasetV3(Dataset):
         aux_target_stats: dict[str, np.ndarray] | None = None,
         return_aux_targets: bool = False,
         verbose: bool = True,
+        purge_gap: int | None = None,
+        split: str | None = None,
+        validation_split: float = 0.1,
+        split_boundaries: dict[str, str] | None = None,
     ):
+        if seq_len < 1 or prediction_horizon < 1 or volume_profile_period < 1:
+            raise ValueError("window lengths must be positive")
+        if not 0 < train_split < 1 or not 0 < validation_split < 1 - train_split:
+            raise ValueError("train and validation fractions must leave a nonempty test split")
+        if purge_gap is not None and purge_gap < 0:
+            raise ValueError("purge_gap must be nonnegative")
+        if not np.isfinite(min_pattern_profit) or min_pattern_profit < 0:
+            raise ValueError("min_pattern_profit must be finite and nonnegative")
+        self.split = split or ("train" if train else "validation")
+        if self.split not in {"train", "validation", "test"}:
+            raise ValueError("split must be train, validation or test")
+        if self.split != "train" and (normalization_stats is None or aux_target_stats is None):
+            raise ValueError("validation/test require normalization and auxiliary statistics from train")
         self.seq_len = seq_len
         self.prediction_horizon = prediction_horizon
         self.volume_profile_period = volume_profile_period
@@ -45,6 +62,18 @@ class TradingDatasetV3(Dataset):
         
         # Load data
         df = pd.read_csv(csv_path)
+        if df.empty:
+            raise ValueError(f"Trading data is empty: {csv_path}")
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+            if df["timestamp"].isna().any():
+                raise ValueError("Trading data contains invalid timestamps")
+            df = df.sort_values("timestamp").reset_index(drop=True)
+            if df["timestamp"].duplicated().any():
+                raise ValueError("duplicate timestamps are not allowed")
+            intervals = df["timestamp"].diff().dropna()
+            if intervals.nunique() != 1:
+                raise ValueError("timestamps must have a regular interval without gaps")
 
         required_cols = {
             'timestamp',
@@ -58,6 +87,27 @@ class TradingDatasetV3(Dataset):
                 "TradingDatasetV3 expects merged spot/futures data with basis. "
                 f"Missing columns: {missing_required}"
             )
+        numeric_columns = sorted(required_cols - {"timestamp"})
+        if not np.isfinite(df[numeric_columns].to_numpy(dtype=float)).all():
+            raise ValueError("required market columns contain NaN or infinity")
+        for market in ("spot", "futures"):
+            prices = df[[f"{market}_{name}" for name in ("open", "high", "low", "close")]]
+            if (prices <= 0).any().any() or (df[f"{market}_volume"] <= 0).any():
+                raise ValueError("prices and volumes must be positive")
+            if ((prices[f"{market}_high"] < prices.max(axis=1)) |
+                    (prices[f"{market}_low"] > prices.min(axis=1))).any():
+                raise ValueError("inconsistent OHLC prices")
+        if split_boundaries is None:
+            split_boundaries = {
+                "train_end": df["timestamp"].iloc[int(len(df) * train_split)].isoformat(),
+                "validation_end": df["timestamp"].iloc[int(len(df) * (train_split + validation_split))].isoformat(),
+            }
+        train_end = pd.to_datetime(split_boundaries["train_end"], utc=True)
+        validation_end = pd.to_datetime(split_boundaries["validation_end"], utc=True)
+        if not df["timestamp"].iloc[0] < train_end < validation_end <= df["timestamp"].iloc[-1]:
+            raise ValueError("split boundaries are outside the supplied history")
+        self.split_boundaries = {"train_end": train_end.isoformat(),
+                                 "validation_end": validation_end.isoformat()}
         
         # Track where OI is truly available and avoid look-ahead imputation.
         if 'open_interest' in df.columns:
@@ -85,15 +135,24 @@ class TradingDatasetV3(Dataset):
         # CRITICAL: Detect patterns
         df = self._detect_patterns(df)
         
-        # Remove NaN rows
-        df = df.dropna()
-        
-        # Split train/val
-        split_idx = int(len(df) * train_split)
-        if train:
-            df = df.iloc[:split_idx]
-        else:
-            df = df.iloc[split_idx:]
+        all_features = self._extract_features(df)
+        all_patterns = self._extract_pattern_labels(df)
+        all_aux = self._extract_aux_targets(df)
+        selection = {
+            "train": df["timestamp"] < train_end,
+            "validation": (df["timestamp"] >= train_end) & (df["timestamp"] < validation_end),
+            "test": df["timestamp"] >= validation_end,
+        }[self.split].to_numpy(copy=True)
+        selection[:max(100, volume_profile_period)] = False
+        indices = np.flatnonzero(selection)
+        if purge_gap and self.split != "test":
+            indices = indices[:-purge_gap]
+        self.features = all_features[indices]
+        self.patterns = all_patterns[indices]
+        self.aux_targets = all_aux[indices]
+        if len(self) < 1:
+            raise ValueError(f"{self.split} split is too short for warmup, sequence and horizon")
+        df = df.iloc[indices]
         self.oi_available_ratio = float(df['oi_available'].mean()) if 'oi_available' in df.columns else 0.0
 
         # Keep aligned market data for backtesting to avoid index drift.
@@ -108,9 +167,9 @@ class TradingDatasetV3(Dataset):
         self.spot_close = df['spot_close'].reset_index(drop=True)
         
         # Extract features and pattern labels
-        self.features = self._extract_features(df)
-        self.patterns = self._extract_pattern_labels(df)
-        self.aux_targets = self._extract_aux_targets(df)
+        target_slice = slice(self.seq_len, self.seq_len + len(self))
+        if not np.isfinite(self.aux_targets[target_slice]).all():
+            raise ValueError("incomplete auxiliary targets in a valid sample")
         
         # Normalize features
         if normalization_stats is None:
@@ -119,35 +178,27 @@ class TradingDatasetV3(Dataset):
         else:
             self.feature_mean = np.asarray(normalization_stats["feature_mean"], dtype=np.float32)
             self.feature_std = np.asarray(normalization_stats["feature_std"], dtype=np.float32)
-            if self.feature_mean.shape[0] != self.features.shape[1]:
-                raise ValueError(
-                    "Normalization stats feature dimension mismatch: "
-                    f"expected {self.features.shape[1]}, got {self.feature_mean.shape[0]}"
-                )
+        self._validate_stats(self.feature_mean, self.feature_std, self.features.shape[1])
         self.feature_std = np.maximum(self.feature_std, self.STD_FLOOR)
         self.features = (self.features - self.feature_mean) / self.feature_std
         self.features = self.features.astype(np.float32, copy=False)
         self.patterns = self.patterns.astype(np.float32, copy=False)
 
         if aux_target_stats is None:
-            self.aux_target_mean = self.aux_targets.mean(axis=0)
-            self.aux_target_std = self.aux_targets.std(axis=0) + 1e-8
+            self.aux_target_mean = self.aux_targets[target_slice].mean(axis=0)
+            self.aux_target_std = self.aux_targets[target_slice].std(axis=0) + 1e-8
         else:
             self.aux_target_mean = np.asarray(aux_target_stats["aux_target_mean"], dtype=np.float32)
             self.aux_target_std = np.asarray(aux_target_stats["aux_target_std"], dtype=np.float32)
-            if self.aux_target_mean.shape[0] != self.aux_targets.shape[1]:
-                raise ValueError(
-                    "Aux target stats dimension mismatch: "
-                    f"expected {self.aux_targets.shape[1]}, got {self.aux_target_mean.shape[0]}"
-                )
+        self._validate_stats(self.aux_target_mean, self.aux_target_std, 4)
         self.aux_target_std = np.maximum(self.aux_target_std, self.STD_FLOOR)
         self.aux_targets = (self.aux_targets - self.aux_target_mean) / self.aux_target_std
-        self.aux_targets = np.clip(self.aux_targets, -5.0, 5.0).astype(np.float32, copy=False)
+        self.aux_targets = self.aux_targets.astype(np.float32, copy=False)
         
         # Count patterns
         if self.verbose:
-            pattern_counts = self.patterns.sum(axis=0)
-            print(f"{'Train' if train else 'Val'} dataset: {len(self)} samples, "
+            pattern_counts = self.patterns[target_slice].sum(axis=0)
+            print(f"{self.split} dataset: {len(self)} samples, "
                   f"{self.features.shape[1]} features")
             print(f"  OI available: {self.oi_available_ratio * 100:.2f}% rows")
             print(f"  CVD Patterns:")
@@ -172,6 +223,13 @@ class TradingDatasetV3(Dataset):
             print(f"    POC breakout down: {int(pattern_counts[15])}")
             print(f"  No pattern (hold): {int(pattern_counts[16])}")
     
+    @staticmethod
+    def _validate_stats(mean, std, dimension):
+        if mean.shape != (dimension,) or std.shape != (dimension,):
+            raise ValueError("invalid normalization shapes")
+        if not np.isfinite(mean).all() or not np.isfinite(std).all() or (std <= 0).any():
+            raise ValueError("normalization statistics must be finite with positive standard deviations")
+
     def _add_volume_profile(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add Volume Profile indicators: POC, VAH, VAL."""
         # Use spot data for volume profile
@@ -322,11 +380,9 @@ class TradingDatasetV3(Dataset):
         return df
     
     def _detect_patterns(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Detect trading patterns at the MOMENT they start (entry point).
-        
-        Pattern = START of movement, not prediction of future!
-        We detect when conditions are met AND movement is beginning.
-        """
+        """Label next-open entries using previous-bar signals and future holding returns."""
+        market = df
+        df = df.shift(1).copy()
         lookback = 14
         # Volatility-adaptive threshold makes divergence detection scale-safe
         # across different BTC price regimes and prevents label starvation.
@@ -351,8 +407,8 @@ class TradingDatasetV3(Dataset):
         volume_spike = df['spot_volume'] > df['spot_volume'].rolling(20).mean() * 1.5
         
         # Future return for validation (but pattern triggers NOW)
-        future_price = df['spot_close'].shift(-self.prediction_horizon)
-        future_return = (future_price - df['spot_close']) / df['spot_close']
+        future_price = market['spot_close'].shift(-(self.prediction_horizon - 1))
+        future_return = (future_price - market['spot_open']) / market['spot_open']
         
         # === CVD PATTERNS (detect at START of movement) ===
         
@@ -489,8 +545,9 @@ class TradingDatasetV3(Dataset):
         
         # Store future return for training
         df['future_return'] = future_return
-        
-        return df
+        label_columns = [name for name in df if name.startswith("pattern_") or name == "future_return"]
+        market[label_columns] = df[label_columns]
+        return market
     
     def _extract_features(self, df: pd.DataFrame) -> np.ndarray:
         """Extract features with Z-score normalization."""
@@ -543,6 +600,7 @@ class TradingDatasetV3(Dataset):
             'vwap_distance',
         ]
         
+        self.feature_names = feature_cols
         features = df[feature_cols].fillna(0).values
         features = np.nan_to_num(features, nan=0.0, posinf=3.0, neginf=-3.0)
         
@@ -575,33 +633,32 @@ class TradingDatasetV3(Dataset):
 
     def _extract_aux_targets(self, df: pd.DataFrame) -> np.ndarray:
         """Extract normalized auxiliary regression targets."""
-        horizon = self.prediction_horizon
+        horizon = self.prediction_horizon - 1
         future_volume_change = (
-            (df["futures_volume"].shift(-horizon) - df["futures_volume"])
-            / (df["futures_volume"] + 1e-8)
+            (df["futures_volume"].shift(-horizon) - df["futures_volume"].shift(1))
+            / (df["futures_volume"].shift(1) + 1e-8)
         )
         future_cvd_change = (
-            (df["futures_cvd"].shift(-horizon) - df["futures_cvd"])
-            / (np.abs(df["futures_cvd"]) + 1e-8)
+            (df["futures_cvd"].shift(-horizon) - df["futures_cvd"].shift(1))
+            / (np.abs(df["futures_cvd"].shift(1)) + 1e-8)
         )
         future_poc_movement = (
-            (df["poc"].shift(-horizon) - df["poc"])
-            / (df["spot_close"] + 1e-8)
+            (df["poc"].shift(-horizon) - df["poc"].shift(1))
+            / (df["spot_close"].shift(1) + 1e-8)
         )
 
         aux = np.column_stack(
             [
-                df["future_return"].fillna(0.0).values,
-                future_volume_change.fillna(0.0).values,
-                future_cvd_change.fillna(0.0).values,
-                future_poc_movement.fillna(0.0).values,
+                df["future_return"].values,
+                future_volume_change.values,
+                future_cvd_change.values,
+                future_poc_movement.values,
             ]
         )
-        aux = np.nan_to_num(aux, nan=0.0, posinf=0.0, neginf=0.0)
         return aux
     
     def __len__(self) -> int:
-        return len(self.features) - self.seq_len - self.prediction_horizon
+        return max(0, len(self.features) - self.seq_len - self.prediction_horizon + 1)
 
     def get_normalization_stats(self) -> dict[str, np.ndarray]:
         return {
@@ -616,6 +673,8 @@ class TradingDatasetV3(Dataset):
         }
     
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if not 0 <= idx < len(self):
+            raise IndexError(idx)
         features = self.features[idx:idx + self.seq_len]
         patterns = self.patterns[idx + self.seq_len]
 

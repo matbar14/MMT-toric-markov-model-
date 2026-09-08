@@ -8,13 +8,13 @@ import torch.nn.functional as F
 
 
 class DiscreteMarkovChain(nn.Module):
-    """Differentiable Markov chain with Gumbel-Softmax transitions."""
+    """Input-conditioned soft state recurrence with deterministic transitions."""
 
     def __init__(self, hidden_dim: int, num_states: int, temperature: float = 1.0) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_states = num_states
-        self.temperature = temperature
+        self.set_temperature(temperature)
 
         self.token_proj = nn.Linear(hidden_dim, num_states, bias=False)
         self.state_proj = nn.Parameter(torch.randn(num_states, num_states) * 0.01)
@@ -38,13 +38,10 @@ class DiscreteMarkovChain(nn.Module):
             state_probs = F.one_hot(state_idx, self.num_states).float()
             return state_probs, state_idx
 
-        state_probs = F.gumbel_softmax(
-            logits,
-            tau=self.temperature,
-            hard=False,
-            dim=-1,
-        )
+        state_probs = torch.softmax(logits / self.temperature, dim=-1)
         return state_probs, None
 
     def set_temperature(self, temperature: float) -> None:
+        if not 0 < temperature < float("inf"):
+            raise ValueError("temperature must be finite and positive")
         self.temperature = temperature

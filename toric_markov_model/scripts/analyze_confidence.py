@@ -8,60 +8,28 @@ import argparse
 import numpy as np
 import torch
 
-from toric_markov_model.data.trading_dataset_v3 import TradingDatasetV3
-from toric_markov_model.model.trading_model_v3 import ToricTradingModelV3
 from toric_markov_model.train import select_device
+from toric_markov_model.train.checkpoint import dataset_from_checkpoint, load_checkpoint
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, default="btc_data_with_basis.csv")
-    parser.add_argument("--checkpoint", type=str, default="checkpoints_trading_v3_basis/best_model.pt")
+    parser.add_argument("--checkpoint", type=str, default="checkpoints_trading_v3_basis/best_model_stage0.pt")
     parser.add_argument("--samples", type=int, default=200)
     parser.add_argument("--confidence-threshold", type=float, default=0.0)
     parser.add_argument("--pattern-prob-threshold", type=float, default=0.0)
-    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     device = select_device(args.device)
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    ckpt_args = checkpoint["args"]
-
-    normalization = checkpoint.get("normalization")
-    norm_stats = None
-    if normalization is not None:
-        norm_stats = {
-            "feature_mean": normalization["feature_mean"].detach().cpu().numpy(),
-            "feature_std": normalization["feature_std"].detach().cpu().numpy(),
-        }
-
-    test_dataset = TradingDatasetV3(
-        csv_path=args.data,
-        seq_len=ckpt_args.seq_len,
-        prediction_horizon=ckpt_args.prediction_horizon,
-        train=False,
-        min_pattern_profit=getattr(ckpt_args, "min_pattern_profit", 0.005),
-        normalization_stats=norm_stats,
-    )
-
-    model = ToricTradingModelV3(
-        num_features=test_dataset.features.shape[1],
-        dim_angles=ckpt_args.dim_angles,
-        max_len=ckpt_args.seq_len,
-        num_states=ckpt_args.num_states,
-        num_levels=4,
-        num_layers=ckpt_args.num_layers,
-        n_bits=8,
-        use_attention=True,
-        num_patterns=17,
-        predict_return=True,
-    ).to(device)
-
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
+    checkpoint, model = load_checkpoint(args.checkpoint, device)
+    test_dataset = dataset_from_checkpoint(checkpoint, args.data, split="validation")
+    if args.samples < 1:
+        raise ValueError("samples must be positive")
 
     print("Analyzing confidence distribution...")
     print("=" * 80)

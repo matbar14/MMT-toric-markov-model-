@@ -1,1 +1,1 @@
-"""Test package."""
+"""Executable regression tests for the supervised trading contract."""

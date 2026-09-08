@@ -1,9 +1,7 @@
 torch>=2.0
 numpy
-tqdm
-tensorboard
-datasets
-tiktoken
 pandas
 scikit-learn
 lightgbm
+joblib
+requests

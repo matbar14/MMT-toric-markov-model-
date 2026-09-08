@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.18)
+project(toric_train LANGUAGES CXX)
+
+find_package(Torch REQUIRED)
+add_executable(toric_train train.cpp)
+target_compile_features(toric_train PRIVATE cxx_std_20)
+target_link_libraries(toric_train PRIVATE "${TORCH_LIBRARIES}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(toric_train PRIVATE -Wall -Wextra)
+endif()

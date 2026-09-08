@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+from toric_markov_model.execution import exit_on_bar
 try:
     import joblib
 except ImportError:  # pragma: no cover - optional dependency for gate baseline
@@ -19,6 +20,7 @@ except ImportError:  # pragma: no cover - optional dependency for gate baseline
 from toric_markov_model.data.trading_dataset_v3 import TradingDatasetV3
 from toric_markov_model.model.trading_model_v3 import ToricTradingModelV3
 from toric_markov_model.train import select_device
+from toric_markov_model.train.checkpoint import dataset_from_checkpoint, load_checkpoint
 
 
 def build_gate_feature_row(seq: np.ndarray, windows: tuple[int, ...], lags: tuple[int, ...]) -> np.ndarray:
@@ -49,17 +51,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, required=True, help="Path to CSV with data")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
-    parser.add_argument("--device", type=str, default="cuda", help="Device: cuda/cpu")
-    parser.add_argument("--train-split", type=float, default=None, help="Override train/val split used inside dataset")
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--split", choices=("validation", "test"), default="test")
     parser.add_argument("--initial-capital", type=float, default=10000, help="Initial capital")
     parser.add_argument("--position-size", type=float, default=0.95, help="Fraction of capital per trade")
     parser.add_argument("--transaction-cost", type=float, default=0.001, help="Transaction cost (0.1%%)")
-    parser.add_argument("--confidence-threshold", type=float, default=0.50, help="Min confidence to trade (0.0-1.0)")
-    parser.add_argument("--pattern-prob-threshold", type=float, default=0.30, help="Min pattern probability to treat signal as valid")
-    parser.add_argument("--signal-threshold", type=float, default=0.22, help="Min (probability * confidence) score for entry")
-    parser.add_argument("--use-checkpoint-pattern-threshold", action="store_true", help="Use best_val_binary_non_hold_threshold from checkpoint as pattern-prob-threshold")
+    parser.add_argument("--confidence-threshold", type=float, default=None, help="Min joint score; default from checkpoint")
+    parser.add_argument("--pattern-prob-threshold", type=float, default=None, help="Min conditional score; default from checkpoint")
+    parser.add_argument("--gate-threshold", type=float, default=None, help="Event gate threshold; default from checkpoint")
+    parser.add_argument("--signal-threshold", type=float, default=0.0, help="Additional minimum joint score")
     parser.add_argument("--cooldown-bars", type=int, default=1, help="Bars to wait after closing position")
-    parser.add_argument("--max-hold-bars", type=int, default=96, help="Force-close position after N bars (0 to disable)")
+    parser.add_argument("--max-hold-bars", type=int, default=None, help="Holding bars including entry; default is prediction horizon")
     parser.add_argument("--take-profit", type=float, default=0.02, help="Take profit percentage (default 2%%)")
     parser.add_argument("--stop-loss", type=float, default=0.01, help="Stop loss percentage (default 1%%)")
     parser.add_argument("--intrabar-priority", type=str, default="stop_first", choices=["stop_first", "take_first"], help="If both TP and SL hit in same bar")
@@ -123,6 +125,7 @@ class TradingBacktest:
         gate_baseline_threshold: float = 0.50,
         gate_windows: tuple[int, ...] = (3, 5, 10),
         gate_lags: tuple[int, ...] = (1, 2, 3),
+        gate_threshold: float = 0.5,
     ):
         self.model = model
         self.initial_capital = float(initial_capital)
@@ -130,6 +133,7 @@ class TradingBacktest:
         self.transaction_cost = float(transaction_cost)
         self.confidence_threshold = float(confidence_threshold)
         self.pattern_prob_threshold = float(pattern_prob_threshold)
+        self.gate_threshold = float(gate_threshold)
         self.signal_threshold = float(signal_threshold)
         self.cooldown_bars = int(cooldown_bars)
         self.max_hold_bars = int(max_hold_bars)
@@ -313,39 +317,20 @@ class TradingBacktest:
         self.cooldown_remaining = self.cooldown_bars
         return True
 
-    def check_exit_conditions(self, bar_high: float, bar_low: float, bar_close: float) -> tuple[bool, float, str]:
+    def check_exit_conditions(self, bar_high: float, bar_low: float, bar_close: float,
+                              bar_open: float | None = None) -> tuple[bool, float, str]:
         """Check TP/SL and max-hold using intrabar high/low range."""
         if self.position_side == 0:
             return False, bar_close, ""
 
-        if self.position_side > 0:
-            tp_price = self.entry_price * (1.0 + self.take_profit_pct)
-            sl_price = self.entry_price * (1.0 - self.stop_loss_pct)
-            hit_tp = bar_high >= tp_price
-            hit_sl = bar_low <= sl_price
-        else:
-            tp_price = self.entry_price * (1.0 - self.take_profit_pct)
-            sl_price = self.entry_price * (1.0 + self.stop_loss_pct)
-            hit_tp = bar_low <= tp_price
-            hit_sl = bar_high >= sl_price
-
-        if hit_tp and hit_sl:
-            if self.intrabar_priority == "stop_first":
-                return True, float(sl_price), "STOP_LOSS"
-            return True, float(tp_price), "TAKE_PROFIT"
-        if hit_tp:
-            return True, float(tp_price), "TAKE_PROFIT"
-        if hit_sl:
-            return True, float(sl_price), "STOP_LOSS"
-
-        if self.max_hold_bars > 0 and self.position_bars >= self.max_hold_bars:
-            return True, float(bar_close), "MAX_HOLD"
-
-        return False, float(bar_close), ""
+        return exit_on_bar(self.position_side, self.entry_price, bar_open, bar_high, bar_low,
+                           bar_close, self.stop_loss_pct, self.take_profit_pct, self.position_bars,
+                           self.max_hold_bars, self.intrabar_priority)
 
     def run(self, dataset: TradingDatasetV3) -> dict[str, float]:
         """Run backtest on dataset with PATTERN DETECTION."""
         self.reset()
+        self.model.eval()
         device = next(self.model.parameters()).device
 
         print(f"Running backtest on {len(dataset)} samples...")
@@ -380,7 +365,7 @@ class TradingBacktest:
         last_close_price: float | None = None
         market_len = len(dataset.spot_open)
 
-        for i in range(len(dataset)):
+        for i in range(market_len - dataset.seq_len):
             bar_idx = i + dataset.seq_len
             if bar_idx >= market_len:
                 break
@@ -398,7 +383,8 @@ class TradingBacktest:
 
             if self.position_side != 0:
                 self.position_bars += 1
-                should_exit, exit_price, exit_reason = self.check_exit_conditions(high_price, low_price, close_price)
+                should_exit, exit_price, exit_reason = self.check_exit_conditions(
+                    high_price, low_price, close_price, open_price)
                 if should_exit:
                     self._close_position(exit_price, timestamp, exit_reason)
                 self._record_portfolio(timestamp, close_price)
@@ -423,6 +409,9 @@ class TradingBacktest:
                     )
                 continue
 
+            if i >= len(dataset):
+                self._record_portfolio(timestamp, close_price)
+                continue
             features_cpu, _ = dataset[i]
             gate_prob = 1.0
             if self.gate_baseline_model is not None:
@@ -442,6 +431,7 @@ class TradingBacktest:
                     features,
                     confidence_threshold=self.confidence_threshold,
                     pattern_prob_threshold=self.pattern_prob_threshold,
+                    gate_threshold=self.gate_threshold,
                 )
 
             best_pattern = int(result["best_non_hold_pattern"].item())
@@ -488,6 +478,11 @@ class TradingBacktest:
                 )
                 if opened:
                     counters["opened"] += 1
+                    self.position_bars = 1
+                    should_exit, exit_price, exit_reason = self.check_exit_conditions(
+                        high_price, low_price, close_price, open_price)
+                    if should_exit:
+                        self._close_position(exit_price, timestamp, exit_reason)
 
             self._record_portfolio(timestamp, close_price)
 
@@ -735,97 +730,23 @@ def main() -> None:
     print("=" * 80)
     print("Loading checkpoint...")
 
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    ckpt_args = checkpoint["args"]
-
-    if args.use_checkpoint_pattern_threshold:
-        best_val_threshold = checkpoint.get("best_val_binary_non_hold_threshold")
-        if best_val_threshold is not None:
-            args.pattern_prob_threshold = float(best_val_threshold)
-            print(
-                "Using checkpoint pattern threshold: "
-                f"pattern_prob_threshold={args.pattern_prob_threshold:.2f}"
-            )
-
-    normalization = checkpoint.get("normalization")
-    norm_stats = None
-    if normalization is not None:
-        norm_stats = {
-            "feature_mean": normalization["feature_mean"].detach().cpu().numpy(),
-            "feature_std": normalization["feature_std"].detach().cpu().numpy(),
-        }
-
-    train_split = args.train_split
-    if train_split is None:
-        train_split = float(getattr(ckpt_args, "train_split", 0.8))
-
-    print("Creating V3 PATTERN DETECTION model...")
-    try:
-        test_dataset = TradingDatasetV3(
-            csv_path=args.data,
-            seq_len=ckpt_args.seq_len,
-            prediction_horizon=ckpt_args.prediction_horizon,
-            train=False,
-            train_split=train_split,
-            min_pattern_profit=getattr(ckpt_args, "min_pattern_profit", 0.003),
-            normalization_stats=norm_stats,
-        )
-    except ValueError as exc:
-        if "Normalization stats feature dimension mismatch" in str(exc):
-            raw_dataset = TradingDatasetV3(
-                csv_path=args.data,
-                seq_len=ckpt_args.seq_len,
-                prediction_horizon=ckpt_args.prediction_horizon,
-                train=False,
-                train_split=train_split,
-                min_pattern_profit=getattr(ckpt_args, "min_pattern_profit", 0.003),
-                normalization_stats=None,
-            )
-            ckpt_dim = int(len(norm_stats["feature_mean"])) if norm_stats is not None else -1
-            data_dim = int(raw_dataset.features.shape[1])
-            raise RuntimeError(
-                "Checkpoint/data feature mismatch. "
-                f"Checkpoint expects {ckpt_dim} features, current dataset builds {data_dim}. "
-                "Use a checkpoint retrained with current feature set."
-            ) from exc
-        raise
-    num_features = test_dataset.features.shape[1]
-    print(f"Model expects {num_features} features")
-
-    model = ToricTradingModelV3(
-        num_features=num_features,
-        dim_angles=ckpt_args.dim_angles,
-        max_len=ckpt_args.seq_len,
-        num_states=ckpt_args.num_states,
-        num_levels=4,
-        num_layers=ckpt_args.num_layers,
-        n_bits=8,
-        use_attention=True,
-        num_patterns=17,
-        predict_return=True,
-    ).to(device)
-
-    try:
-        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-        print("✓ Model loaded (strict=False, some keys may be missing)")
-    except RuntimeError as exc:
-        raise RuntimeError(
-            "Failed to load checkpoint into current model architecture. "
-            "Most likely feature dimension or layer config mismatch."
-        ) from exc
-    model.eval()
-
-    print(
-        f"Loaded model from epoch {checkpoint['epoch']} "
-        f"(val_loss={checkpoint['val_loss']:.4f}, "
-        f"val_acc={checkpoint['val_accuracy']:.2f}%)"
-    )
-    if "val_non_hold_f1" in checkpoint:
-        print(
-            f"Checkpoint non-hold F1={checkpoint['val_non_hold_f1']:.2f}% "
-            f"(P={checkpoint.get('val_non_hold_precision', 0.0):.2f}%, "
-            f"R={checkpoint.get('val_non_hold_recall', 0.0):.2f}%)"
-        )
+    if args.optimize_signal_threshold and args.split != "validation":
+        raise ValueError("threshold optimization is allowed only on validation, never on test")
+    if args.gate_baseline_model and args.split == "test":
+        raise ValueError("external experimental gates have no verified split provenance; use validation")
+    checkpoint, model = load_checkpoint(args.checkpoint, device)
+    test_dataset = dataset_from_checkpoint(checkpoint, args.data, split=args.split)
+    saved_thresholds = checkpoint["decision_thresholds"]
+    if args.confidence_threshold is None:
+        args.confidence_threshold = saved_thresholds["confidence_threshold"]
+    if args.pattern_prob_threshold is None:
+        args.pattern_prob_threshold = saved_thresholds["pattern_prob_threshold"]
+    if args.gate_threshold is None:
+        args.gate_threshold = saved_thresholds["gate_threshold"]
+    if args.max_hold_bars is None:
+        args.max_hold_bars = checkpoint["data_config"]["prediction_horizon"]
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    print(f"Loaded epoch {checkpoint['epoch']}; evaluating {args.split} with fixed training boundaries")
 
     print("\nRunning backtest...")
     print("=" * 80)
@@ -843,6 +764,7 @@ def main() -> None:
         "transaction_cost": args.transaction_cost,
         "confidence_threshold": args.confidence_threshold,
         "pattern_prob_threshold": args.pattern_prob_threshold,
+        "gate_threshold": args.gate_threshold,
         "cooldown_bars": args.cooldown_bars,
         "max_hold_bars": args.max_hold_bars,
         "take_profit_pct": args.take_profit,
@@ -928,7 +850,7 @@ def main() -> None:
     print(f"Metrics saved to: {metrics_output}")
 
     start_idx = test_dataset.seq_len
-    end_idx = min(start_idx + len(test_dataset) - 1, len(test_dataset.spot_close) - 1)
+    end_idx = len(test_dataset.spot_close) - 1
     if start_idx < len(test_dataset.spot_open) and end_idx >= start_idx:
         first_price = float(test_dataset.spot_open.iloc[start_idx])
         last_price = float(test_dataset.spot_close.iloc[end_idx])

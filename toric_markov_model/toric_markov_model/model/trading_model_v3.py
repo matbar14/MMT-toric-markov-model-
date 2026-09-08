@@ -1,21 +1,11 @@
-"""Trading model v3 with PATTERN DETECTION instead of direction classification.
-
-CRITICAL CHANGE: Instead of predicting direction on every candle, we detect PATTERNS:
-- CVD patterns (divergences, reversals, exhaustion, spikes)
-- Basis patterns (spread anomalies)
-- OI patterns (accumulation/distribution)
-- Volume Profile patterns (POC breakouts)
-
-Model outputs which pattern is present (multi-label classification).
-Trade ONLY when a pattern is detected with high confidence.
-"""
+"""Toric encoder with an event gate, conditional pattern labels and regression."""
 
 from __future__ import annotations
 
 import math
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from .embeddings import QuantizedPositionalShifts
 from .fractal_cell import FractalToricCell
@@ -24,383 +14,194 @@ from .quantizer import angles_to_complex, complex_to_features, quantize_angle
 
 
 class ContinuousFeatureEmbedding(nn.Module):
-    """Embed continuous features as quantized angles (like QuantizedAngleEmbedding but for continuous input)."""
-    
     def __init__(self, num_features: int, embedding_dim: int, n_bits: int = 8):
         super().__init__()
-        self.num_features = num_features
-        self.embedding_dim = embedding_dim
         self.n_bits = n_bits
-        
-        # Project features to angles
         self.feature_to_angles = nn.Linear(num_features, embedding_dim)
-        
+
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            features: [batch, seq_len, num_features]
-        Returns:
-            complex phases: [batch, seq_len, embedding_dim]
-        """
-        # Project to angle space
-        angles = self.feature_to_angles(features)
-        # Bound to [-pi, pi]
-        angles = torch.tanh(angles) * math.pi
-        # Quantize
-        angles_q = quantize_angle(angles, self.n_bits)
-        # Convert to complex
-        return angles_to_complex(angles_q)
+        angles = torch.tanh(self.feature_to_angles(features)) * math.pi
+        return angles_to_complex(quantize_angle(angles, self.n_bits))
 
 
-class ToricTradingModelV3(nn.Module):
-    """COMPLETE fractal toric architecture for PATTERN DETECTION."""
-    
+class ToricEncoder(nn.Module):
     def __init__(
-        self,
-        num_features: int = 35,
-        dim_angles: int = 128,
-        max_len: int = 64,
-        num_states: int = 256,
-        num_levels: int = 4,
-        num_layers: int = 3,
-        n_bits: int = 8,
-        use_attention: bool = True,
-        num_patterns: int = 17,  # 16 patterns + hold
-        predict_return: bool = True,
+        self, num_features: int = 28, dim_angles: int = 64, max_len: int = 64,
+        num_states: int = 128, num_levels: int = 4, num_layers: int = 2,
+        n_bits: int = 8, use_attention: bool = True,
     ):
         super().__init__()
-        if dim_angles % num_levels != 0:
-            raise ValueError("dim_angles must be divisible by num_levels")
-        
+        dimensions = (num_features, dim_angles, max_len, num_states, num_levels, num_layers)
+        if any(value <= 0 for value in dimensions) or dim_angles % num_levels:
+            raise ValueError("positive dimensions and dim_angles divisible by num_levels required")
+        if not 1 <= n_bits <= 16:
+            raise ValueError("invalid n_bits")
         self.num_features = num_features
         self.dim_angles = dim_angles
         self.max_len = max_len
         self.num_states = num_states
         self.num_levels = num_levels
-        self.num_layers = num_layers
-        self.n_bits = n_bits
-        self.use_attention = use_attention
-        self.num_patterns = num_patterns
-        self.predict_return = predict_return
-        
-        # Feature embedding (replaces token_emb)
         self.feature_emb = ContinuousFeatureEmbedding(num_features, dim_angles, n_bits)
-        
-        # Positional shifts (SAME as original)
         self.pos_emb = QuantizedPositionalShifts(max_len, dim_angles, n_bits)
-        
-        # Markov chain (SAME as original)
-        self.markov_chain = DiscreteMarkovChain(
-            hidden_dim=2 * dim_angles,
-            num_states=num_states,
-        )
-        
-        # Fractal toric layers (SAME as original)
+        self.markov_chain = DiscreteMarkovChain(2 * dim_angles, num_states)
         self.toric_layers = nn.ModuleList([
-            FractalToricCell(
-                dim_angles=dim_angles,
-                num_levels=num_levels,
-                num_states=num_states,
-                use_attention=use_attention,
-            )
+            FractalToricCell(dim_angles, num_levels, num_states, use_attention)
             for _ in range(num_layers)
         ])
-        
-        # Complex feature fusion: keep real/imag plus explicit phase/magnitude
-        # while projecting back to 2*dim for downstream heads.
         self.complex_feature_fusion = nn.Sequential(
-            nn.Linear(5 * dim_angles, 2 * dim_angles),
-            nn.LayerNorm(2 * dim_angles),
-            nn.GELU(),
+            nn.Linear(2 * dim_angles, 2 * dim_angles),
+            nn.LayerNorm(2 * dim_angles), nn.GELU(),
         )
-
-        # FIX 2: Feature anchor projection for residual connection
         self.feature_anchor = nn.Linear(num_features, 2 * dim_angles)
-        
-        # PRIMARY TASK: Pattern detection (multi-label classification)
-        # Each pattern is independent - can have multiple patterns active
-        self.pattern_head = nn.Sequential(
-            nn.Linear(2 * dim_angles, dim_angles),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(dim_angles, num_patterns),
-            # No sigmoid - use BCEWithLogitsLoss
+
+    def encode(self, features: torch.Tensor) -> torch.Tensor:
+        if features.ndim != 3 or features.shape[-1] != self.num_features:
+            raise ValueError("features must have shape (batch, sequence, num_features)")
+        batch_size, seq_len, _ = features.shape
+        if batch_size == 0 or not 1 <= seq_len <= self.max_len:
+            raise ValueError("empty batch or sequence length outside model limits")
+        if not torch.isfinite(features).all():
+            raise ValueError("features contain NaN or infinity")
+        token_phase = self.feature_emb(features)
+        positions = torch.arange(seq_len, device=features.device)
+        pos_phase = self.pos_emb(positions).unsqueeze(0).expand(batch_size, -1, -1)
+        token_levels = token_phase.chunk(self.num_levels, dim=-1)
+        pos_levels = pos_phase.chunk(self.num_levels, dim=-1)
+        level_dim = self.dim_angles // self.num_levels
+        states = [torch.ones(batch_size, level_dim, dtype=token_phase.dtype, device=features.device)
+                  for _ in range(self.num_levels)]
+        state_probs = features.new_zeros(batch_size, self.num_states)
+        state_probs[:, 0] = 1
+        for timestep in range(seq_len):
+            state_probs, _ = self.markov_chain(
+                complex_to_features(token_phase[:, timestep]), state_probs,
+            )
+            for layer in self.toric_layers:
+                states = layer(states, [level[:, timestep] for level in token_levels],
+                               [level[:, timestep] for level in pos_levels], state_probs)
+        hidden = self.complex_feature_fusion(complex_to_features(torch.cat(states, dim=-1)))
+        return hidden + 0.1 * self.feature_anchor(features[:, -1])
+
+
+class ToricTradingModelV3(ToricEncoder):
+    AUX_NAMES = (
+        "predicted_return", "predicted_volume_change",
+        "predicted_cvd_change", "predicted_poc_movement",
+    )
+
+    def __init__(
+        self, num_features: int = 28, dim_angles: int = 64, max_len: int = 64,
+        num_states: int = 128, num_levels: int = 4, num_layers: int = 2,
+        n_bits: int = 8, use_attention: bool = True, num_patterns: int = 17,
+        predict_return: bool = True, dropout: float = 0.2,
+    ):
+        if num_patterns < 2 or not 0 <= dropout < 1:
+            raise ValueError("invalid num_patterns or dropout")
+        super().__init__(num_features, dim_angles, max_len, num_states, num_levels,
+                         num_layers, n_bits, use_attention)
+        self.config = dict(
+            num_features=num_features, dim_angles=dim_angles, max_len=max_len,
+            num_states=num_states, num_levels=num_levels, num_layers=num_layers,
+            n_bits=n_bits, use_attention=use_attention, num_patterns=num_patterns,
+            predict_return=predict_return, dropout=dropout,
         )
-        
-        # Pattern confidence head
-        self.confidence_head = nn.Sequential(
-            nn.Linear(2 * dim_angles, dim_angles),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(dim_angles, num_patterns),
-            nn.Sigmoid(),
+        self.num_patterns = num_patterns
+        self.predict_return = predict_return
+        self.decision_thresholds = dict(confidence_threshold=0.0, pattern_prob_threshold=0.5,
+                                        gate_threshold=0.5)
+        self.pattern_head = self._head(dim_angles, num_patterns - 1, dropout)
+        self.non_hold_gate_head = self._head(dim_angles, 1, dropout)
+        if predict_return:
+            self.aux_head = self._head(dim_angles, 4, dropout)
+        self.register_buffer("aux_target_mean", torch.zeros(4))
+        self.register_buffer("aux_target_std", torch.ones(4))
+        self.register_buffer("has_aux_stats", torch.tensor(False))
+
+    @staticmethod
+    def _head(dim_angles: int, output_dim: int, dropout: float) -> nn.Sequential:
+        return nn.Sequential(
+            nn.Linear(2 * dim_angles, dim_angles), nn.GELU(),
+            nn.Dropout(dropout), nn.Linear(dim_angles, output_dim),
         )
 
-        # Stage-1 gate: hold vs any non-hold pattern
-        self.non_hold_gate_head = nn.Sequential(
-            nn.Linear(2 * dim_angles, dim_angles // 2),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(dim_angles // 2, 1),
-        )
-        
-        # AUXILIARY TASKS for multi-task learning (now take 2*dim_angles input)
-        if predict_return:
-            # Task 1: Price return
-            self.return_head = nn.Sequential(
-                nn.Linear(2 * dim_angles, dim_angles),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(dim_angles, 1),
-            )
-            
-            # Task 2: Volume change
-            self.volume_head = nn.Sequential(
-                nn.Linear(2 * dim_angles, dim_angles),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(dim_angles, 1),
-            )
-            
-            # Task 3: CVD change
-            self.cvd_head = nn.Sequential(
-                nn.Linear(2 * dim_angles, dim_angles),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(dim_angles, 1),
-            )
-            
-            # Task 4: POC movement
-            self.poc_head = nn.Sequential(
-                nn.Linear(2 * dim_angles, dim_angles),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(dim_angles, 1),
-            )
-            
-            # Task 5: Market regime (trend/flat classification)
-            self.regime_head = nn.Sequential(
-                nn.Linear(2 * dim_angles, dim_angles),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(dim_angles, 3),  # 3 classes: flat, weak_trend, strong_trend
-            )
-            
-            # Task 6: Reversal detection (binary)
-            self.reversal_head = nn.Sequential(
-                nn.Linear(2 * dim_angles, dim_angles),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(dim_angles, 2),  # 2 classes: no_reversal, reversal
-            )
-            
-            # Task 7: Breakout detection
-            self.breakout_head = nn.Sequential(
-                nn.Linear(2 * dim_angles, dim_angles),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(dim_angles, 3),  # 3 classes: no_breakout, breakout_up, breakout_down
-            )
-    def forward(
-        self,
-        features: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        """
-        Forward pass - detect patterns instead of predicting direction.
-        Returns dict with pattern predictions.
-        
-        Args:
-            features: [batch, seq_len, num_features]
-        
-        Returns:
-            Dictionary with pattern_logits, pattern_confidence, and auxiliary predictions
-        """
-        batch_size, seq_len = features.shape[0], features.shape[1]
-        device = features.device
-        
-        # Feature embedding (replaces token_emb)
-        token_phase = self.feature_emb(features)  # [batch, seq_len, dim_angles]
-        
-        # Positional shifts (SAME as original)
-        positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
-        pos_phase = self.pos_emb(positions)  # [batch, seq_len, dim_angles]
-        
-        # Split into levels (SAME as original)
-        token_levels = torch.chunk(token_phase, self.num_levels, dim=-1)
-        pos_levels = torch.chunk(pos_phase, self.num_levels, dim=-1)
-        
-        # Initialize hidden states (SAME as original)
-        level_dim = self.dim_angles // self.num_levels
-        h_levels = [
-            torch.ones(batch_size, level_dim, dtype=torch.cfloat, device=device)
-            for _ in range(self.num_levels)
-        ]
-        
-        # Initialize markov state (SAME as original)
-        state_probs = torch.zeros(batch_size, self.num_states, device=device)
-        state_probs[:, 0] = 1.0
-        
-        # Process sequence (SAME as original forward_with_per_step_logits)
-        for t in range(seq_len):
-            # Get current token phase
-            token_t = token_phase[:, t, :]
-            token_feat_t = complex_to_features(token_t)
-            
-            # Update markov state
-            if self.training:
-                state_probs, _ = self.markov_chain(token_feat_t, state_probs, hard=False)
-            else:
-                state_probs, _ = self.markov_chain(token_feat_t, state_probs, hard=True)
-            
-            # Update hidden states through fractal layers
-            token_levels_t = [lvl[:, t, :] for lvl in token_levels]
-            pos_levels_t = [lvl[:, t, :] for lvl in pos_levels]
-            
-            for layer in self.toric_layers:
-                h_levels = layer(h_levels, token_levels_t, pos_levels_t, state_probs)
-        
-        # Concatenate final hidden states (SAME as original)
-        h_concat = torch.cat(h_levels, dim=-1)  # [batch, dim_angles] complex
-        
-        # FIX 1: Keep all complex information with explicit magnitude + phase.
-        h_magnitude = torch.abs(h_concat)  # [batch, dim_angles]
-        h_phase = torch.angle(h_concat)  # [batch, dim_angles]
-        h_complex_features = torch.cat(
-            [
-                h_concat.real,
-                h_concat.imag,
-                h_magnitude,
-                torch.sin(h_phase),
-                torch.cos(h_phase),
-            ],
-            dim=-1,
-        )  # [batch, 5*dim_angles]
-        h_out = self.complex_feature_fusion(h_complex_features)  # [batch, 2*dim_angles]
-        
-        # FIX 2: Add residual connection - anchor to original features
-        # Get last timestep features as anchor
-        last_features = features[:, -1, :]  # [batch, num_features]
-        # Project to same dimension
-        features_proj = self.feature_anchor(last_features)  # [batch, 2*dim_angles]
-        # Combine with residual
-        h_out = h_out + 0.1 * features_proj  # Small residual weight
-        
-        # All predictions
+    def set_aux_target_stats(self, stats: dict) -> None:
+        mean = torch.as_tensor(stats["aux_target_mean"], device=self.aux_target_mean.device)
+        std = torch.as_tensor(stats["aux_target_std"], device=self.aux_target_std.device)
+        if mean.shape != (4,) or std.shape != (4,):
+            raise ValueError("auxiliary statistics must have shape (4,)")
+        if not torch.isfinite(mean).all() or not torch.isfinite(std).all() or (std <= 0).any():
+            raise ValueError("invalid auxiliary statistics")
+        self.aux_target_mean.copy_(mean)
+        self.aux_target_std.copy_(std)
+        self.has_aux_stats.fill_(True)
+
+    def forward(self, features: torch.Tensor) -> dict[str, torch.Tensor]:
+        hidden = self.encode(features)
+        gate_logit = self.non_hold_gate_head(hidden)
         outputs = {
-            'pattern_logits': self.pattern_head(h_out),  # [batch, num_patterns]
-            'pattern_confidence': self.confidence_head(h_out),  # [batch, num_patterns]
-            'non_hold_logit': self.non_hold_gate_head(h_out),  # [batch, 1]
+            "pattern_logits": torch.cat((self.pattern_head(hidden), -gate_logit), dim=-1),
+            "non_hold_logit": gate_logit,
         }
-        
         if self.predict_return:
-            outputs['predicted_return'] = torch.tanh(self.return_head(h_out))
-            outputs['predicted_volume_change'] = torch.tanh(self.volume_head(h_out))
-            outputs['predicted_cvd_change'] = torch.tanh(self.cvd_head(h_out))
-            outputs['predicted_poc_movement'] = torch.tanh(self.poc_head(h_out))
-            outputs['regime_logits'] = self.regime_head(h_out)
-            outputs['reversal_logits'] = self.reversal_head(h_out)
-            outputs['breakout_logits'] = self.breakout_head(h_out)
-        
+            auxiliary = self.aux_head(hidden)
+            outputs.update({name: auxiliary[:, index:index + 1]
+                            for index, name in enumerate(self.AUX_NAMES)})
         return outputs
-    
+
+    def decode_outputs(
+        self, outputs: dict[str, torch.Tensor], confidence_threshold: float = 0.0,
+        pattern_prob_threshold: float = 0.5, gate_threshold: float = 0.5,
+    ) -> dict[str, torch.Tensor]:
+        """Confidence is a joint gate-times-conditional score, not calibrated certainty."""
+        if any(not 0 <= value <= 1 for value in
+               (confidence_threshold, pattern_prob_threshold, gate_threshold)):
+            raise ValueError("decision thresholds must be in [0, 1]")
+        conditional = outputs["pattern_logits"][:, :-1].sigmoid()
+        gate = outputs["non_hold_logit"].sigmoid()
+        scores = conditional * gate
+        active = ((conditional >= pattern_prob_threshold) & (scores >= confidence_threshold)
+                  & (gate >= gate_threshold))
+        has_pattern = active.any(dim=-1)
+        selected = scores.masked_fill(~active, -1).argmax(dim=-1)
+        best = torch.where(has_pattern, selected, scores.argmax(dim=-1))
+        best_prob = conditional.gather(1, best[:, None]).squeeze(1)
+        best_score = scores.gather(1, best[:, None]).squeeze(1)
+        hold_prob = 1 - gate.squeeze(1)
+        joint = torch.cat((scores, hold_prob[:, None]), dim=-1)
+        return {
+            "pattern_probs": joint, "conditional_pattern_probs": conditional,
+            "pattern_confidence": joint, "pattern_scores": joint,
+            "strongest_pattern": torch.where(has_pattern, best, self.num_patterns - 1),
+            "strongest_confidence": torch.where(has_pattern, best_score, hold_prob),
+            "has_pattern": has_pattern, "best_non_hold_pattern": best,
+            "best_non_hold_prob": best_prob, "best_non_hold_confidence": best_score,
+            "best_non_hold_score": best_score, "non_hold_prob": gate.squeeze(1),
+            "hold_prob": hold_prob, "hold_confidence": hold_prob, "hold_score": hold_prob,
+            "active_patterns": torch.cat((active, ~has_pattern[:, None]), dim=-1),
+        }
+
+    def set_decision_thresholds(self, thresholds):
+        if (set(thresholds) != set(self.decision_thresholds) or
+                any(not 0 <= value <= 1 for value in thresholds.values())):
+            raise ValueError("complete decision thresholds in [0, 1] required")
+        self.decision_thresholds = dict(thresholds)
+
     @torch.inference_mode()
     def detect_patterns(
-        self,
-        features: torch.Tensor,
-        confidence_threshold: float = 0.7,
-        pattern_prob_threshold: float = 0.5,
+        self, features: torch.Tensor, confidence_threshold: float | None = None,
+        pattern_prob_threshold: float | None = None, gate_threshold: float | None = None,
     ) -> dict[str, torch.Tensor]:
-        """
-        Detect patterns with confidence filtering.
-        
-        Args:
-            features: [batch, seq_len, num_features]
-            confidence_threshold: Minimum confidence to report pattern
-            pattern_prob_threshold: Minimum pattern probability to report pattern
-        
-        Returns:
-            Dictionary with detected patterns and their confidences
-        """
-        outputs = self.forward(features)
-        
-        # Apply sigmoid to get probabilities
-        pattern_probs = torch.sigmoid(outputs['pattern_logits'])
-        pattern_confidence = outputs['pattern_confidence']
-        pattern_scores = pattern_probs * pattern_confidence
-        non_hold_prob = torch.sigmoid(outputs['non_hold_logit']).squeeze(1)
-
-        # Last label is reserved for "hold"
-        hold_idx = self.num_patterns - 1
-        non_hold_probs = pattern_probs[..., :hold_idx]
-        non_hold_confidence = pattern_confidence[..., :hold_idx]
-        non_hold_scores = pattern_scores[..., :hold_idx]
-
-        best_non_hold_pattern = torch.argmax(non_hold_scores, dim=-1)
-        best_non_hold_prob = torch.gather(
-            non_hold_probs, 1, best_non_hold_pattern.unsqueeze(1)
-        ).squeeze(1)
-        best_non_hold_confidence = torch.gather(
-            non_hold_confidence, 1, best_non_hold_pattern.unsqueeze(1)
-        ).squeeze(1)
-        best_non_hold_score = torch.gather(
-            non_hold_scores, 1, best_non_hold_pattern.unsqueeze(1)
-        ).squeeze(1)
-
-        hold_prob = pattern_probs[:, hold_idx]
-        hold_confidence = pattern_confidence[:, hold_idx]
-        hold_score = pattern_scores[:, hold_idx]
-
-        # Multi-label gating: do not force argmax against "hold".
-        has_pattern = (
-            (non_hold_prob >= pattern_prob_threshold)
-            & 
-            (best_non_hold_prob >= pattern_prob_threshold)
-            & (best_non_hold_confidence >= confidence_threshold)
-        )
-
-        strongest_pattern = torch.where(
-            has_pattern,
-            best_non_hold_pattern,
-            torch.full_like(best_non_hold_pattern, hold_idx),
-        )
-        strongest_confidence = torch.where(
-            has_pattern,
-            best_non_hold_confidence,
-            hold_confidence,
-        )
-
-        active_patterns = (
-            (pattern_probs >= pattern_prob_threshold)
-            & (pattern_confidence >= confidence_threshold)
-        )
-        # "Hold" should only be active if no other pattern passed thresholds.
-        active_patterns[:, hold_idx] = ~torch.any(active_patterns[:, :hold_idx], dim=1)
-        
-        result = {
-            'pattern_probs': pattern_probs,
-            'pattern_confidence': pattern_confidence,
-            'pattern_scores': pattern_scores,
-            'strongest_pattern': strongest_pattern,
-            'strongest_confidence': strongest_confidence,
-            'has_pattern': has_pattern,
-            'best_non_hold_pattern': best_non_hold_pattern,
-            'best_non_hold_prob': best_non_hold_prob,
-            'best_non_hold_confidence': best_non_hold_confidence,
-            'best_non_hold_score': best_non_hold_score,
-            'non_hold_prob': non_hold_prob,
-            'hold_prob': hold_prob,
-            'hold_confidence': hold_confidence,
-            'hold_score': hold_score,
-            'active_patterns': active_patterns,
-        }
-        
+        if self.training:
+            raise RuntimeError("call model.eval() before inference")
+        thresholds = dict(self.decision_thresholds)
+        overrides = dict(confidence_threshold=confidence_threshold, pattern_prob_threshold=pattern_prob_threshold,
+                         gate_threshold=gate_threshold)
+        thresholds.update({name: value for name, value in overrides.items() if value is not None})
+        outputs = self(features)
+        result = self.decode_outputs(outputs, **thresholds)
         if self.predict_return:
-            result['predicted_return'] = outputs['predicted_return']
-            result['predicted_volume_change'] = outputs['predicted_volume_change']
-            result['predicted_cvd_change'] = outputs['predicted_cvd_change']
-            result['predicted_poc_movement'] = outputs['predicted_poc_movement']
-            result['regime'] = torch.argmax(outputs['regime_logits'], dim=-1)
-            result['reversal'] = torch.argmax(outputs['reversal_logits'], dim=-1)
-            result['breakout'] = torch.argmax(outputs['breakout_logits'], dim=-1)
-        
+            if not self.has_aux_stats.item():
+                raise RuntimeError("load train auxiliary statistics before inference")
+            for index, name in enumerate(self.AUX_NAMES):
+                result[name] = outputs[name] * self.aux_target_std[index] + self.aux_target_mean[index]
         return result

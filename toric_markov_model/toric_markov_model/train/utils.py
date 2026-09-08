@@ -1,4 +1,4 @@
-"""Training helpers (schedulers, clipping, logging)."""
+"""Random seed and device selection helpers."""
 
 from __future__ import annotations
 
@@ -16,10 +16,8 @@ def set_seed(seed: int) -> None:
 
 
 def select_device(device_name: str) -> torch.device:
-    if device_name == "cuda" and torch.cuda.is_available():
-        return torch.device("cuda")
-    return torch.device("cpu")
-
-
-def grad_clip(parameters, max_norm: float) -> float:
-    return float(torch.nn.utils.clip_grad_norm_(parameters, max_norm=max_norm))
+    if device_name not in ("cpu", "cuda"):
+        raise ValueError("device must be cpu or cuda")
+    if device_name == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is unavailable; select --device cpu explicitly")
+    return torch.device(device_name)

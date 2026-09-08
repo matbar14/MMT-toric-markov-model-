@@ -1,0 +1,1 @@
+"""Toric trading model package."""

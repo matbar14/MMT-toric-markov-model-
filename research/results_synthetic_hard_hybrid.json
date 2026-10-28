@@ -1,0 +1,43 @@
+{
+  "config": {
+    "n_train": 2500,
+    "n_val": 600,
+    "n_test": 600,
+    "seq": 96,
+    "horizon": 24,
+    "epochs": 25,
+    "batch": 64,
+    "lr": 0.002,
+    "patience": 5,
+    "dim": 48,
+    "states": 24,
+    "hidden": 64,
+    "speed_scale": 2.0,
+    "models": "hybrid,dlinear,naive",
+    "out": "research/results_synthetic_hard_hybrid.json"
+  },
+  "models": {
+    "hybrid": {
+      "params": 46466,
+      "best_val_mse": 0.37696,
+      "test_mse": 0.37433,
+      "test_mae": 0.50491
+    },
+    "dlinear": {
+      "params": 4656,
+      "best_val_mse": 0.34076,
+      "test_mse": 0.33878,
+      "test_mae": 0.46186
+    },
+    "persistence": {
+      "params": 0,
+      "test_mse": 0.55743,
+      "test_mae": 0.54802
+    },
+    "drift": {
+      "params": 0,
+      "test_mse": 7.24304,
+      "test_mae": 1.84497
+    }
+  }
+}

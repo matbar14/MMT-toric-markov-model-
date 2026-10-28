@@ -1,0 +1,55 @@
+{
+  "config": {
+    "n_train": 2500,
+    "n_val": 600,
+    "n_test": 600,
+    "seq": 96,
+    "horizon": 24,
+    "epochs": 25,
+    "batch": 64,
+    "lr": 0.002,
+    "patience": 5,
+    "dim": 48,
+    "states": 24,
+    "hidden": 64,
+    "speed_scale": 2.0,
+    "models": "mmt,gru,transformer,dlinear,naive",
+    "out": "research/results_synthetic_hard.json"
+  },
+  "models": {
+    "mmt": {
+      "params": 40946,
+      "best_val_mse": 0.5424,
+      "test_mse": 0.53244,
+      "test_mae": 0.63212
+    },
+    "gru": {
+      "params": 15768,
+      "best_val_mse": 0.51684,
+      "test_mse": 0.50428,
+      "test_mae": 0.61046
+    },
+    "transformer": {
+      "params": 101848,
+      "best_val_mse": 0.51884,
+      "test_mse": 0.50697,
+      "test_mae": 0.61254
+    },
+    "dlinear": {
+      "params": 4656,
+      "best_val_mse": 0.34069,
+      "test_mse": 0.33883,
+      "test_mae": 0.46186
+    },
+    "persistence": {
+      "params": 0,
+      "test_mse": 0.55743,
+      "test_mae": 0.54802
+    },
+    "drift": {
+      "params": 0,
+      "test_mse": 7.24304,
+      "test_mae": 1.84497
+    }
+  }
+}

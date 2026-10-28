@@ -1,0 +1,39 @@
+{
+  "config": {
+    "n_train": 300,
+    "n_val": 100,
+    "n_test": 100,
+    "seq": 64,
+    "horizon": 12,
+    "epochs": 50,
+    "batch": 64,
+    "lr": 0.003,
+    "patience": 50,
+    "dim": 48,
+    "states": 24,
+    "hidden": 64,
+    "speed_scale": 1.0,
+    "models": "mmt,gru,dlinear",
+    "out": "research/results_overfit_probe.json"
+  },
+  "models": {
+    "mmt": {
+      "params": 39782,
+      "best_val_mse": 0.53342,
+      "test_mse": 0.52611,
+      "test_mae": 0.62816
+    },
+    "gru": {
+      "params": 14988,
+      "best_val_mse": 0.50878,
+      "test_mse": 0.49313,
+      "test_mae": 0.59795
+    },
+    "dlinear": {
+      "params": 1560,
+      "best_val_mse": 0.09749,
+      "test_mse": 0.09823,
+      "test_mae": 0.22121
+    }
+  }
+}

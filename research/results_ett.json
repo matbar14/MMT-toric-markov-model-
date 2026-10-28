@@ -1,0 +1,60 @@
+{
+  "note": "dlinear/gru/seasonal trained with --epochs 8; mmt/hybrid with --epochs 6; same split/lr/batch",
+  "config": {
+    "data_dir": "data/ETT-small",
+    "epochs": 6,
+    "batch": 128,
+    "lr": 0.002,
+    "patience": 3,
+    "dim": 32,
+    "states": 32,
+    "hidden": 64,
+    "models": "mmt,hybrid",
+    "out": "research/results_ett.json"
+  },
+  "per_run_configs": {
+    "run1": {
+      "models": [
+        "dlinear",
+        "gru",
+        "seasonal"
+      ],
+      "epochs": 8
+    },
+    "run2": {
+      "models": [
+        "mmt",
+        "hybrid"
+      ],
+      "epochs": 6
+    }
+  },
+  "models": {
+    "dlinear": {
+      "params": 18624,
+      "test_mse": 0.3904,
+      "test_mae": 0.4048
+    },
+    "seasonal": {
+      "test_mse": 0.5122,
+      "test_mae": 0.4333
+    },
+    "hybrid": {
+      "params": 87906,
+      "best_val_mse": 1.10586,
+      "test_mse": 0.77867,
+      "test_mae": 0.62672
+    },
+    "gru": {
+      "params": 57696,
+      "test_mse": 0.7821,
+      "test_mae": 0.6731
+    },
+    "mmt": {
+      "params": 69282,
+      "best_val_mse": 1.27214,
+      "test_mse": 1.08731,
+      "test_mae": 0.7919
+    }
+  }
+}

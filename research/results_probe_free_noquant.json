@@ -1,0 +1,30 @@
+{
+  "config": {
+    "n_train": 300,
+    "n_val": 100,
+    "n_test": 100,
+    "seq": 64,
+    "horizon": 12,
+    "epochs": 50,
+    "batch": 64,
+    "lr": 0.003,
+    "patience": 50,
+    "dim": 48,
+    "states": 24,
+    "hidden": 64,
+    "speed_scale": 1.0,
+    "kernel": "free",
+    "no_quant": true,
+    "amplitude": true,
+    "models": "mmt",
+    "out": "research/results_probe_free_noquant.json"
+  },
+  "models": {
+    "mmt": {
+      "params": 40646,
+      "best_val_mse": 0.51189,
+      "test_mse": 0.49671,
+      "test_mae": 0.60228
+    }
+  }
+}

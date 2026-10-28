@@ -41,3 +41,4 @@ tensorboard/
 htmlcov/
 .DS_Store
 Thumbs.db
+data/

@@ -45,6 +45,26 @@ limitations are recorded in `MODEL_REPAIR_REPORT.md`. The repaired model emits
 signals, but the evaluated strategy loses money after costs; it is not approved
 for live trading.
 
+## Core Research Playground
+
+The `research/` directory decouples the toric model core from trading and
+benchmarks it honestly against GRU / LSTM / Transformer / DLinear / naive
+baselines on (1) a synthetic Markov-switching rotation task — the model's own
+inductive bias — and (2) the standard ETTh1 96->96 forecasting protocol.
+Result so far, at realistic CPU budgets: a per-channel linear AR (DLinear)
+wins everywhere, the toric core adds no measurable value yet, and neither it
+nor generic RNNs can overfit the synthetic phase task — an optimization
+failure shared across architectures, documented with numbers in
+`research/README.md`. A cleaned-up core (angle-parameterized rotations, a
+proper Markov-kernel option, geodesic gating, optional amplitude bypass) and
+a hybrid linear-base-plus-toric-correction forecaster live in
+`research/toric_core.py`.
+
+```bash
+python -m research.synthetic_torus --models mmt,gru,dlinear,naive --epochs 6
+python -m research.ett_experiment --models dlinear,gru,seasonal --epochs 8
+```
+
 ## Delta-Neutral Research
 
 The current redesign is **long BTCUSDT spot + short the same BTC quantity in

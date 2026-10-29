@@ -146,3 +146,90 @@ def evaluate_naive(predict_fn, x: torch.Tensor, y: torch.Tensor, batch_size: int
         abs_err_sum += diff.abs().sum().item()
         count += diff.numel()
     return sq_err_sum / count, abs_err_sum / count
+
+
+class _CorrectionView(nn.Module):
+    """Exposes only the toric correction path of a HybridForecaster."""
+
+    def __init__(self, hybrid) -> None:
+        super().__init__()
+        self.hybrid = hybrid
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        hidden = self.hybrid.encoder(features)
+        return self.hybrid.correction_head(hidden).view(
+            features.shape[0], self.hybrid.horizon, self.hybrid.num_channels
+        )
+
+
+def train_hybrid_residual(
+    model,
+    train_x: torch.Tensor,
+    train_y: torch.Tensor,
+    val_x: torch.Tensor,
+    val_y: torch.Tensor,
+    base_epochs: int = 10,
+    residual_epochs: int = 30,
+    batch_size: int = 64,
+    lr: float = 1e-3,
+    patience: int = 4,
+    seed: int = 0,
+    log: bool = True,
+) -> dict:
+    """Two-phase hybrid training (roadmap item 2).
+
+    Phase 1 trains the linear base (trend + seasonal heads) alone; the toric
+    path is frozen and zero-initialized, so this is exactly a DLinear.
+    Phase 2 freezes the base and trains the toric encoder + correction head
+    against the base's *residual* (y - base(x)), so the toric core is asked a
+    clean question — "explain what linearity cannot" — and can never
+    destabilize the base with correction noise.
+
+    Returns the same dict shape as ``train_model``; ``best_val_mse`` is the
+    full-model validation MSE after phase 2.
+    """
+    history: list[dict] = []
+
+    # ---- Phase 1: linear base only ----
+    for parameter in model.encoder.parameters():
+        parameter.requires_grad_(False)
+    for parameter in model.correction_head.parameters():
+        parameter.requires_grad_(False)
+    if log:
+        print("  [phase 1: linear base]", flush=True)
+    base_outcome = train_model(
+        model, train_x, train_y, val_x, val_y,
+        epochs=base_epochs, batch_size=batch_size, lr=lr,
+        patience=patience, seed=seed, log=log,
+    )
+    history += [{"phase": "base", **entry} for entry in base_outcome["history"]]
+
+    # ---- Phase 2: toric correction on the frozen base's residual ----
+    for parameter in model.encoder.parameters():
+        parameter.requires_grad_(True)
+    for parameter in model.correction_head.parameters():
+        parameter.requires_grad_(True)
+    for parameter in list(model.trend_head.parameters()) + list(model.seasonal_head.parameters()):
+        parameter.requires_grad_(False)
+
+    with torch.no_grad():
+        model.eval()
+        residual_train = train_y - model.linear_base(train_x)
+        residual_val = val_y - model.linear_base(val_x)
+    if log:
+        print(
+            f"  [phase 2: toric correction, residual val mse="
+            f"{residual_val.pow(2).mean().item():.4f}]",
+            flush=True,
+        )
+    view = _CorrectionView(model)
+    residual_outcome = train_model(
+        view, train_x, residual_train, val_x, residual_val,
+        epochs=residual_epochs, batch_size=batch_size, lr=lr,
+        patience=patience, seed=seed, log=log,
+    )
+    history += [{"phase": "residual", **entry} for entry in residual_outcome["history"]]
+
+    model.eval()
+    full_val_mse, full_val_mae = evaluate(model, val_x, val_y)
+    return {"model": model, "history": history, "best_val_mse": full_val_mse}

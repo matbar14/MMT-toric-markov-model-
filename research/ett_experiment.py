@@ -46,6 +46,7 @@ from .train_utils import (
     evaluate,
     evaluate_naive,
     make_windows,
+    train_hybrid_residual,
     train_model,
 )
 from .toric_core import HybridForecaster, ToricForecaster
@@ -84,15 +85,20 @@ def main() -> None:
     parser.add_argument("--dim", type=int, default=32, help="toric angle dimension")
     parser.add_argument("--states", type=int, default=32, help="toric states")
     parser.add_argument("--hidden", type=int, default=64, help="baseline width")
+    parser.add_argument("--diff-input", action="store_true",
+                        help="append first differences to the model inputs")
+    parser.add_argument("--base-epochs", type=int, default=4,
+                        help="linear-base epochs for hybrid_res phase 1")
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--models", type=str, default="dlinear,gru,seasonal",
-        help="comma list from: dlinear, gru, lstm, transformer, mmt, hybrid, seasonal",
+        help="comma list from: dlinear, gru, lstm, transformer, mmt, hybrid, hybrid_res, seasonal",
     )
     parser.add_argument("--out", type=str, default="research/results_ett.json")
     args = parser.parse_args()
 
-    torch.manual_seed(0)
-    np.random.seed(0)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
 
     values = load_etth1(Path(args.data_dir))
     standardizer = Standardizer.fit(values[:TRAIN_END])
@@ -117,26 +123,24 @@ def main() -> None:
         if name in ("gru", "lstm"):
             return RecurrentForecaster(
                 7, HORIZON, num_channels=7,
-                kind=name, hidden_dim=args.hidden,
+                kind=name, hidden_dim=args.hidden, use_diff_input=args.diff_input,
             )
         if name == "transformer":
             from .baselines import TransformerForecaster
 
-            return TransformerForecaster(7, HORIZON, num_channels=7, d_model=args.hidden)
-        if name == "mmt":
-            return ToricForecaster(
-                7, HORIZON, num_channels=7,
+            return TransformerForecaster(
+                7, HORIZON, num_channels=7, d_model=args.hidden,
+                use_diff_input=args.diff_input,
+            )
+        if name in ("mmt", "hybrid", "hybrid_res"):
+            toric_kwargs = dict(
                 dim_angles=args.dim, num_levels=2, num_states=args.states,
                 num_layers=1, kernel="stochastic", use_attention=True,
-                use_amplitude=True,
+                use_amplitude=True, use_diff_input=args.diff_input,
             )
-        if name == "hybrid":
-            return HybridForecaster(
-                7, SEQ_LEN, HORIZON, num_channels=7,
-                dim_angles=args.dim, num_levels=2, num_states=args.states,
-                num_layers=1, kernel="stochastic", use_attention=True,
-                use_amplitude=True,
-            )
+            if name == "mmt":
+                return ToricForecaster(7, HORIZON, num_channels=7, **toric_kwargs)
+            return HybridForecaster(7, SEQ_LEN, HORIZON, num_channels=7, **toric_kwargs)
         raise ValueError(f"unknown model {name!r}")
 
     results = {"config": vars(args), "models": {}}
@@ -150,11 +154,19 @@ def main() -> None:
             continue
         model = build(name)
         print(f"[{name}] params={count_parameters(model):,}")
-        outcome = train_model(
-            model, train_x, train_y, val_x, val_y,
-            epochs=args.epochs, batch_size=args.batch, lr=args.lr,
-            patience=args.patience,
-        )
+        if name == "hybrid_res":
+            outcome = train_hybrid_residual(
+                model, train_x, train_y, val_x, val_y,
+                base_epochs=args.base_epochs, residual_epochs=args.epochs,
+                batch_size=args.batch, lr=args.lr, patience=args.patience,
+                seed=args.seed,
+            )
+        else:
+            outcome = train_model(
+                model, train_x, train_y, val_x, val_y,
+                epochs=args.epochs, batch_size=args.batch, lr=args.lr,
+                patience=args.patience, seed=args.seed,
+            )
         test_mse, test_mae = evaluate(outcome["model"], test_x, test_y)
         results["models"][name] = {
             "params": count_parameters(model),

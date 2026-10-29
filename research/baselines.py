@@ -26,15 +26,18 @@ class RecurrentForecaster(nn.Module):
         hidden_dim: int = 64,
         num_layers: int = 1,
         dropout: float = 0.1,
+        use_diff_input: bool = False,
     ) -> None:
         super().__init__()
         if kind not in ("gru", "lstm"):
             raise ValueError("kind must be 'gru' or 'lstm'")
         rnn_cls = nn.GRU if kind == "gru" else nn.LSTM
+        self.use_diff_input = use_diff_input
         self.horizon = horizon
         self.num_channels = num_channels
+        input_size = num_features * 2 if use_diff_input else num_features
         self.rnn = rnn_cls(
-            num_features,
+            input_size,
             hidden_dim,
             num_layers=num_layers,
             batch_first=True,
@@ -43,6 +46,10 @@ class RecurrentForecaster(nn.Module):
         self.head = nn.Linear(hidden_dim, horizon * num_channels)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
+        if self.use_diff_input:
+            features = torch.cat(
+                [features, features.diff(dim=1, prepend=features[:, :1, :])], dim=-1
+            )
         out, _ = self.rnn(features)
         return self.head(out[:, -1]).view(
             features.shape[0], self.horizon, self.num_channels
@@ -63,11 +70,14 @@ class TransformerForecaster(nn.Module):
         dim_feedforward: int = 128,
         dropout: float = 0.1,
         max_len: int = 512,
+        use_diff_input: bool = False,
     ) -> None:
         super().__init__()
+        self.use_diff_input = use_diff_input
         self.horizon = horizon
         self.num_channels = num_channels
-        self.input_proj = nn.Linear(num_features, d_model)
+        input_size = num_features * 2 if use_diff_input else num_features
+        self.input_proj = nn.Linear(input_size, d_model)
         self.pos = nn.Parameter(torch.randn(max_len, d_model) * 0.02)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model, nhead, dim_feedforward, dropout, batch_first=True
@@ -77,6 +87,10 @@ class TransformerForecaster(nn.Module):
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         seq_len = features.shape[1]
+        if self.use_diff_input:
+            features = torch.cat(
+                [features, features.diff(dim=1, prepend=features[:, :1, :])], dim=-1
+            )
         hidden = self.input_proj(features) + self.pos[:seq_len].unsqueeze(0)
         hidden = self.encoder(hidden)
         return self.head(hidden[:, -1]).view(

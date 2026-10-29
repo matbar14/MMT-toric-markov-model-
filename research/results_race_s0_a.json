@@ -1,0 +1,46 @@
+{
+  "config": {
+    "n_train": 2500,
+    "n_val": 600,
+    "n_test": 600,
+    "seq": 64,
+    "horizon": 12,
+    "epochs": 30,
+    "batch": 64,
+    "lr": 0.002,
+    "patience": 5,
+    "dim": 48,
+    "states": 24,
+    "hidden": 64,
+    "speed_scale": 1.0,
+    "kernel": "stochastic",
+    "no_quant": false,
+    "amplitude": true,
+    "diff_input": true,
+    "curriculum": false,
+    "base_epochs": 10,
+    "seed": 0,
+    "models": "dlinear,gru,mmt",
+    "out": "research/results_race_s0_a.json"
+  },
+  "models": {
+    "dlinear": {
+      "params": 1560,
+      "best_val_mse": 0.10527,
+      "test_mse": 0.0992,
+      "test_mae": 0.22148
+    },
+    "gru": {
+      "params": 16524,
+      "best_val_mse": 0.49101,
+      "test_mse": 0.49056,
+      "test_mae": 0.59734
+    },
+    "mmt": {
+      "params": 41030,
+      "best_val_mse": 0.49421,
+      "test_mse": 0.49347,
+      "test_mae": 0.59891
+    }
+  }
+}

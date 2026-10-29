@@ -41,6 +41,7 @@ from .train_utils import (
     count_parameters,
     evaluate,
     evaluate_naive,
+    train_hybrid_residual,
     train_model,
 )
 
@@ -94,19 +95,23 @@ def build_model(name: str, num_features: int, seq_len: int, horizon: int, args) 
         kernel=args.kernel,
         use_attention=True,
         use_amplitude=args.amplitude,
+        use_diff_input=args.diff_input,
         quantize_positions=not args.no_quant,
         n_bits=16 if args.no_quant else 8,  # 16 bits ~ effectively unquantized grid
     )
-    if name == "mmt":
-        return ToricForecaster(num_features, horizon, **toric_kwargs)
-    if name == "hybrid":
+    if name in ("mmt", "hybrid", "hybrid_res"):
+        if name == "mmt":
+            return ToricForecaster(num_features, horizon, **toric_kwargs)
         return HybridForecaster(num_features, seq_len, horizon, **toric_kwargs)
-    if name == "gru":
-        return RecurrentForecaster(num_features, horizon, kind="gru", hidden_dim=args.hidden)
-    if name == "lstm":
-        return RecurrentForecaster(num_features, horizon, kind="lstm", hidden_dim=args.hidden)
+    if name in ("gru", "lstm"):
+        return RecurrentForecaster(
+            num_features, horizon, kind=name,
+            hidden_dim=args.hidden, use_diff_input=args.diff_input,
+        )
     if name == "transformer":
-        return TransformerForecaster(num_features, horizon, d_model=args.hidden)
+        return TransformerForecaster(
+            num_features, horizon, d_model=args.hidden, use_diff_input=args.diff_input,
+        )
     if name == "dlinear":
         return DLinearForecaster(seq_len, horizon)
     raise ValueError(f"unknown model {name!r}")
@@ -139,12 +144,19 @@ def main() -> None:
                         help="use a 16-bit phase grid (effectively unquantized)")
     parser.add_argument("--amplitude", action="store_true",
                         help="enable the toric encoder amplitude bypass")
+    parser.add_argument("--diff-input", action="store_true",
+                        help="append first differences to the model inputs")
+    parser.add_argument("--curriculum", action="store_true",
+                        help="mmt only: warm up on half-speed rotations first")
+    parser.add_argument("--base-epochs", type=int, default=10,
+                        help="linear-base epochs for hybrid_res phase 1")
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--models", type=str, default="mmt,gru,lstm,transformer,dlinear,naive")
     parser.add_argument("--out", type=str, default="research/results_synthetic.json")
     args = parser.parse_args()
 
-    torch.manual_seed(0)
-    np.random.seed(0)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     length = args.seq + args.horizon
     print(f"Simulating switching-rotation data (length={length}, d=8, K=4)...")
     x_all, s_all = simulate_switching_rotation(
@@ -181,11 +193,43 @@ def main() -> None:
         model = build_model(name, train_x.shape[-1], args.seq, args.horizon, args)
         params = count_parameters(model)
         print(f"[{name}] params={params:,}")
-        outcome = train_model(
-            model, train_x, train_y, val_x, val_y,
-            epochs=args.epochs, batch_size=args.batch, lr=args.lr,
-            patience=args.patience,
-        )
+        if name == "hybrid_res":
+            outcome = train_hybrid_residual(
+                model, train_x, train_y, val_x, val_y,
+                base_epochs=args.base_epochs, residual_epochs=args.epochs,
+                batch_size=args.batch, lr=args.lr, patience=args.patience,
+                seed=args.seed,
+            )
+        elif name == "mmt" and args.curriculum:
+            # Stage 1: half-speed rotations (easier phase tracking), then the
+            # real task.  Validation always measures the real task.
+            stage_obs, _ = simulate_switching_rotation(
+                args.n_train, length, speed_scale=args.speed_scale * 0.5,
+                seed=args.seed + 100,
+            )
+            easy_x = torch.from_numpy(stage_obs[:, : args.seq])
+            easy_y = torch.from_numpy(stage_obs[:, args.seq :])
+            outcome_stage1 = train_model(
+                model, easy_x, easy_y, val_x, val_y,
+                epochs=args.epochs // 2, batch_size=args.batch, lr=args.lr,
+                patience=args.patience, seed=args.seed,
+            )
+            outcome_stage2 = train_model(
+                model, train_x, train_y, val_x, val_y,
+                epochs=args.epochs - args.epochs // 2, batch_size=args.batch,
+                lr=args.lr, patience=args.patience, seed=args.seed,
+            )
+            outcome = {
+                "model": model,
+                "history": outcome_stage1["history"] + outcome_stage2["history"],
+                "best_val_mse": outcome_stage2["best_val_mse"],
+            }
+        else:
+            outcome = train_model(
+                model, train_x, train_y, val_x, val_y,
+                epochs=args.epochs, batch_size=args.batch, lr=args.lr,
+                patience=args.patience, seed=args.seed,
+            )
         test_mse, test_mae = evaluate(outcome["model"], test_x, test_y)
         entry = {
             "params": params,

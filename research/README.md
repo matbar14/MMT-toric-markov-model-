@@ -94,7 +94,7 @@ reproduces it, which validates the setup.
 | GRU | 0.7821 | 0.6731 | 57,696 |
 | MMT (toric) | 1.0873 | 0.7919 | 69,282 |
 
-## Verdict
+## Verdict (Round 1)
 
 1. On quasi-periodic data — synthetic *and* real — a per-channel linear
    autoregression (DLinear) is the strongest model at every tested budget.
@@ -107,24 +107,103 @@ reproduces it, which validates the setup.
    not a trading problem and not a data-volume problem. Switching application
    domain will not fix it by itself.
 
-## What to try next (in order)
+## Round 2: the three roadmap fixes, tested (diff inputs, residual training, race)
 
-1. **Help the optimizer see dynamics**: add first differences (or sin/cos of a
-   learned phase) as input channels; predict the residual after the linear AR
-   instead of the raw target; curriculum over angular speeds.
-2. **Residual-on-linear target for the toric core** (train the correction head
-   against the linear model's errors with the base frozen) — the current joint
-   training lets correction noise destabilize the base.
+All three planned fixes were implemented and measured. **None of them makes
+the toric core competitive; they do clarify where the problem lives.**
+
+Implemented:
+
+- `use_diff_input` on ToricEncoder / GRU / LSTM / Transformer: first
+  differences are appended to the inputs, exposing the local phase increment
+  (the regime identifier) directly to the model.
+- `train_hybrid_residual` (``hybrid_res``): phase 1 trains the linear base
+  alone (the frozen toric path is zero-initialized, i.e. exactly a DLinear);
+  phase 2 freezes the base and trains the toric encoder + correction head on
+  the base's residual `y - base(x)`.  The correction mathematically cannot
+  destabilize the base.
+- Curriculum for MMT: warm-up on half-speed rotations, then the real task.
+- Convergence race: 30 epochs, patience 5, seeds 0 and 1, diff+amplitude on
+  for all neural models.
+
+### Synthetic home turf (T=64, H=12, 2,500 sequences)
+
+| model | seed 0 test MSE | seed 1 test MSE |
+|-------|-----------------|-----------------|
+| DLinear | **0.0992** | **0.0988** |
+| hybrid_res | 0.1021 | 0.1016 |
+| GRU (+diff) | 0.4906 | 0.4905 |
+| MMT (+diff) | 0.4935 | 0.4941 |
+| MMT (+diff, curriculum) | 0.4935 | — |
+
+Findings:
+
+1. **Diff inputs do not unblock the recurrent models.** GRU/MMT stay at the
+   ~0.49 "predict the mean" plateau.  The information needed (phase and speed
+   are directly recoverable from `(x, dx)`) is present in the inputs; gradient
+   descent still does not find the solution.
+2. **Curriculum does not unblock it either** (0.4935, unchanged).
+3. **The two-phase residual mechanism works exactly as designed** — the base
+   matches standalone DLinear and the correction cannot hurt it — **but the
+   toric core extracts almost nothing from the residual**: residual val MSE
+   moves 0.1085 -> 0.1080 (R^2 ~ 0.5%).  On this task the linear base sits at
+   the achievable floor; there is no structured residue for the torus to
+   explain.
+
+### ETTh1 96 -> 96 (same protocol as Round 1)
+
+| model | test MSE | test MAE |
+|-------|----------|----------|
+| DLinear (round 1) | **0.3904** | 0.4048 |
+| hybrid_res | 0.4031 | 0.4131 |
+| GRU (+diff) | 0.8012 | 0.6906 |
+| MMT (+diff) | 1.0242 | 0.7550 |
+
+The residual-based hybrid lands within noise of pure DLinear (the correction
+costs ~0.013 MSE here).  Note the diagnostic printed before phase 2: the
+linear base leaves a residual val MSE of ~0.67 on ETTh1 — **real structure
+remains after the linear model — but the toric core cannot extract it.**
+A stronger residual learner (e.g. gradient boosting over lag/cycle features,
+as already used elsewhere in this repository) is the natural next experiment.
+
+## Verdict (after Round 2)
+
+1. On quasi-periodic data — synthetic *and* real — a per-channel linear
+   autoregression (DLinear) remains the strongest model at every tested
+   budget, and on the home-turf synthetic task it sits at the achievable
+   floor.  This mirrors the published DLinear result.
+2. The toric model's failure is an *optimization* failure shared with
+   GRU/LSTM/Transformer, not specific to the torus and not a data-volume or
+   domain problem: diff inputs and curriculum do not unblock learning, and
+   neither the toric core nor generic RNNs can overfit 300 sequences.
+3. The residual two-phase hybrid is the right *safety* architecture (the
+   toric path can only help or do nothing), but the toric core currently
+   explains ~0.5% of the residual variance on synthetic data and slightly
+   hurts on ETTh1.
+
+## What to try next (revised after Round 2)
+
+1. **Design a task where linear AR provably fails** — regime-conditional
+   nonlinear structure (e.g. regime-dependent amplitude or frequency chirps
+   with identifiable regimes) — and test whether the toric core, which is the
+   only model here with an explicit discrete-state mechanism, wins there.
+   This is now the *only* path to justifying the architecture.
+2. **Try a stronger residual learner on the ETTh1 residual** (val MSE ~0.67
+   after the linear base): gradient boosting over lag/cycle features — the
+   repository already uses LightGBM elsewhere — to check whether the residual
+   is machine-learnable at all before blaming the toric core.
 3. **Convergence race with a real budget** (GPU, 100+ epochs, lr sweep,
-   several seeds) before any claim about ceilings.
-4. Only after the toric core beats DLinear on at least one synthetic task with
-   regime-conditional dynamics that a mixture-of-linear-models provably cannot
-   represent, move to a real domain: seasonal load forecasting, ECG/HRV phase
-   analysis, or anomaly detection in periodic machinery signals.
+   several seeds) before any claim about ceilings; the CPU race here is
+   consistent across two seeds but small.
+4. Only after the toric core beats DLinear on at least one task a mixture of
+   linear models cannot represent, move to a real domain: seasonal load
+   forecasting, ECG/HRV phase analysis, or anomaly detection in periodic
+   machinery signals.
 
 ## Reproduce
 
 ```bash
+# Round 1
 python -m research.synthetic_torus --models mmt,gru,dlinear,naive --epochs 6
 python -m research.synthetic_torus --models mmt,hybrid,dlinear,naive --epochs 25 --patience 5 \
     --speed-scale 2.0 --horizon 24 --seq 96 --out research/results_synthetic_hard.json
@@ -132,6 +211,18 @@ python -m research.synthetic_torus --models mmt,gru,dlinear --n-train 300 --n-va
     --epochs 50 --patience 50 --lr 3e-3 --out research/results_overfit_probe.json
 python -m research.ett_experiment --models dlinear,gru,seasonal --epochs 8
 python -m research.ett_experiment --models mmt,hybrid --epochs 6
+
+# Round 2 (diff inputs, residual hybrid, curriculum, race)
+python -m research.synthetic_torus --models dlinear,gru,mmt --epochs 30 --patience 5 \
+    --diff-input --amplitude --seed 0 --out research/results_race_s0_a.json
+python -m research.synthetic_torus --models hybrid_res --epochs 30 --patience 5 --base-epochs 10 \
+    --diff-input --amplitude --seed 0 --out research/results_race_s0_b.json
+python -m research.synthetic_torus --models dlinear,gru,mmt,hybrid_res --epochs 30 --patience 5 \
+    --base-epochs 10 --diff-input --amplitude --seed 1 --out research/results_race_s1.json
+python -m research.synthetic_torus --models mmt --epochs 30 --patience 5 --curriculum \
+    --diff-input --amplitude --seed 0 --out research/results_curriculum.json
+python -m research.ett_experiment --models hybrid_res,mmt,gru --epochs 6 --base-epochs 4 \
+    --diff-input --out research/results_ett_round2.json
 ```
 
 Result JSON files are committed next to this README.

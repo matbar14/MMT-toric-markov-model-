@@ -1,0 +1,37 @@
+{
+  "config": {
+    "data_dir": "data/ETT-small",
+    "epochs": 6,
+    "batch": 128,
+    "lr": 0.002,
+    "patience": 3,
+    "dim": 32,
+    "states": 32,
+    "hidden": 64,
+    "diff_input": true,
+    "base_epochs": 4,
+    "seed": 0,
+    "models": "hybrid_res,mmt,gru",
+    "out": "research/results_ett_round2.json"
+  },
+  "models": {
+    "hybrid_res": {
+      "params": 69506,
+      "best_val_mse": 0.68218,
+      "test_mse": 0.40311,
+      "test_mae": 0.41308
+    },
+    "mmt": {
+      "params": 69506,
+      "best_val_mse": 1.1092,
+      "test_mse": 1.02417,
+      "test_mae": 0.75495
+    },
+    "gru": {
+      "params": 59040,
+      "best_val_mse": 0.94618,
+      "test_mse": 0.80116,
+      "test_mae": 0.69061
+    }
+  }
+}

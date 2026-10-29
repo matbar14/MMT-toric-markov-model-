@@ -206,6 +206,7 @@ class ToricEncoder(nn.Module):
         kernel: str = "stochastic",
         use_attention: bool = True,
         use_amplitude: bool = False,
+        use_diff_input: bool = False,
         quantize_positions: bool = True,
         max_len: int = 512,
         dropout: float = 0.1,
@@ -222,8 +223,12 @@ class ToricEncoder(nn.Module):
         self.n_bits = n_bits
         self.quantize_positions = quantize_positions
         self.use_amplitude = use_amplitude
+        self.use_diff_input = use_diff_input
 
-        self.feature_to_angle = nn.Linear(num_features, dim_angles)
+        # First differences double the input width when enabled: they expose the
+        # local phase increment directly, which is the regime identifier.
+        effective_features = num_features * 2 if use_diff_input else num_features
+        self.feature_to_angle = nn.Linear(effective_features, dim_angles)
         self.pos_angle = nn.Parameter(torch.randn(max_len, dim_angles) * 0.1)
         self.chain = ToricMarkovChain(2 * dim_angles, num_states, kernel)
         self.toric_layers = nn.ModuleList(
@@ -254,7 +259,13 @@ class ToricEncoder(nn.Module):
         if not torch.isfinite(features).all():
             raise ValueError("features contain NaN or infinity")
 
-        token_angle = torch.tanh(self.feature_to_angle(features)) * math.pi
+        model_input = features
+        if self.use_diff_input:
+            model_input = torch.cat(
+                [features, features.diff(dim=1, prepend=features[:, :1, :])], dim=-1
+            )
+
+        token_angle = torch.tanh(self.feature_to_angle(model_input)) * math.pi
         token = unit(quantize_angle(token_angle, self.n_bits))
         pos_angles = self.pos_angle[:seq_len]
         if self.quantize_positions:

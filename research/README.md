@@ -759,6 +759,68 @@ MSE, never test.
    (winner) + 3 probe runs (gate_attn_low).  Nothing beyond this; no
    extensions, no tuning.
 
+### Round 4b outcome: primary gate -> closure branch
+
+`gate_attn_low` passed its pre-flight (probe min train **0.0313** at lr
+3e-3 < 0.10; also 0.0743 at 1e-3, 0.0343 at 1e-2) and joined the ladder —
+the pull's *scale*, not the mechanism, was the probe blocker.  Nonlinear
+task, fixed protocol, 5 seeds each (mean +/- std):
+
+| variant | val MSE | **test MSE** | params |
+|---------|---------|--------------|--------|
+| rot | 0.6150 | 0.6300 +/- 0.0242 | 15,608 |
+| chain | 0.6178 | 0.6408 +/- 0.0353 | 16,096 |
+| gate | 0.6138 | 0.6221 +/- 0.0302 | 15,848 |
+| chain_gate | 0.6139 | 0.6262 +/- 0.0248 | 16,336 |
+| **gate_attn_low** | **0.3945** | **0.3799 +/- 0.0049** | 15,897 |
+
+References: GRU 0.3567 (target) | MLP 0.3725 | **old MMT 0.3878** |
+MoE-linear 0.3957.
+
+Check against the registered outcomes:
+
+1. rot alone <= 0.357?  **No** (0.6300).
+2. only with chain and/or gate <= 0.357?  **No** (0.6221-0.6408).
+3. nothing <= 0.373 (MLP)?  **Correct** — the best mean is 0.3799.
+
+=> **The closure branch applies: the project is closed for real, without
+"almost".**  The secondary home-turf gate was registered as conditional on
+a primary win and was therefore **not run**; the budget was respected
+exactly (5 configs x 5 seeds + 3 probe runs, nothing else).
+
+What the round was for — the decomposition is decisive:
+
+1. **chain and gate are dead weight on the nonlinear task.**  rot 0.630,
+   chain 0.641, gate 0.622, chain_gate 0.626 — all four cluster within
+   noise of each other and far below every learned baseline.  The discrete
+   regime machinery adds nothing measurable even in its fully
+   differentiable form.
+2. **The only component that moves the task from "unlearned" (~0.63) to
+   "learned" (0.380) is the attention pull at low weight.**  gate_attn_low
+   differs from chain_gate by nothing except the fixed 0.1x context pull.
+3. gate_attn_low beats the old MMT (0.3878) and MoE-linear (0.3957) with
+   16k params (MMT: 41k), and misses the MLP by 2.0% and GRU by 6.5%.
+
+The attention finding, updated with Round 4b (still a finding, recorded
+as such — not a component negotiated back into a round):
+
+| pull coefficient | probe train | probe test | nonlinear test |
+|------------------|-------------|------------|----------------|
+| 0 (absent) | 0.029-0.036 | 0.59-0.65 | 0.622-0.641 |
+| 0.1 (fixed) | 0.0313 | 0.3651 | **0.3799 +/- 0.0049** |
+| 1.0 (learnable, toric) | 0.1114 | 0.1316 | not run (closed) |
+
+The pull scale separates "can fit" from "can generalize", and at 0.1x it
+is the only registered mechanism that learned the regime-conditional
+dynamics at all.  The reviewer-reserved open question — can the attention
+regularizer learn a real-task signal — now has evidence on both synthetic
+tasks; on real data (ETTh1) it remains untested and requires its own
+pre-registration.
+
+Status: **per the registered stop-loss, the project closes.**  Any Round 5
+(pull-scale schedule, attention on ETTh1, or any other hypothesis) needs a
+new pre-registration approved before launch.
+
 ## Reproduce
 
 ```bash
@@ -838,6 +900,21 @@ python -m research.phase_hybrid --task probe --variant gate --lrs 3e-3 --seeds 0
     --epochs 100 --out research/results_round4_probe_gate.json
 python -m research.phase_hybrid --task probe --variant chain_gate --lrs 3e-3 --seeds 0 \
     --epochs 100 --out research/results_round4_probe_chain_gate.json
+
+# Round 4b (re-registered ladder A + gate_attn_low hypothesis; 5 seeds, no tuning)
+python -m research.phase_hybrid --task probe --variant gate_attn_low --lrs 1e-3,3e-3,1e-2 \
+    --seeds 0 --epochs 100 --out research/results_round4b_probe_gate_attn_low.json
+python -m research.phase_hybrid --task nonlinear --variant rot --epochs 30 --patience 5 \
+    --diff-input --amplitude --lr 2e-3 --seeds 0,1,2,3,4 --out research/results_round4b_nonlinear_rot.json
+python -m research.phase_hybrid --task nonlinear --variant chain --epochs 30 --patience 5 \
+    --diff-input --amplitude --lr 2e-3 --seeds 0,1,2,3,4 --out research/results_round4b_nonlinear_chain.json
+python -m research.phase_hybrid --task nonlinear --variant gate --epochs 30 --patience 5 \
+    --diff-input --amplitude --lr 2e-3 --seeds 0,1,2,3,4 --out research/results_round4b_nonlinear_gate.json
+python -m research.phase_hybrid --task nonlinear --variant chain_gate --epochs 30 --patience 5 \
+    --diff-input --amplitude --lr 2e-3 --seeds 0,1,2,3,4 --out research/results_round4b_nonlinear_chain_gate.json
+python -m research.phase_hybrid --task nonlinear --variant gate_attn_low --epochs 30 --patience 5 \
+    --diff-input --amplitude --lr 2e-3 --seeds 0,1,2,3,4 --out research/results_round4b_nonlinear_gate_attn_low.json
+# (home turf NOT run: registered as conditional on a primary-gate win)
 ```
 
 Result JSON files are committed next to this README.

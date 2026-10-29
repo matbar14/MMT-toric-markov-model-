@@ -1,0 +1,111 @@
+{
+  "config": {
+    "task": "nonlinear",
+    "variant": "rot",
+    "kick_hidden": 64,
+    "dim": 48,
+    "states": 8,
+    "n_train": 2500,
+    "n_val": 600,
+    "n_test": 600,
+    "seq": 64,
+    "horizon": 12,
+    "epochs": 30,
+    "batch": 64,
+    "lr": 0.002,
+    "patience": 5,
+    "lrs": "",
+    "seeds": "0,1,2,3,4",
+    "speed_scale": 1.0,
+    "amplitude": true,
+    "diff_input": true,
+    "seed": 0,
+    "out": "research/results_round4b_nonlinear_rot.json",
+    "use_chain": false,
+    "use_gate": false,
+    "use_attention": false,
+    "attn_pull": 1.0
+  },
+  "mean_predictor_val_mse": 1.30601,
+  "rot": {
+    "aggregate": {
+      "n_seeds": 5,
+      "params": 15608,
+      "best_val_mse": {
+        "mean": 0.61498,
+        "std": 0.01907,
+        "per_seed": [
+          0.64898,
+          0.60502,
+          0.60599,
+          0.60591,
+          0.60901
+        ]
+      },
+      "test_mse": {
+        "mean": 0.63004,
+        "std": 0.02422,
+        "per_seed": [
+          0.67172,
+          0.61625,
+          0.6135,
+          0.61797,
+          0.63074
+        ]
+      },
+      "test_mae": {
+        "mean": 0.5958,
+        "std": 0.02111,
+        "per_seed": [
+          0.63198,
+          0.58396,
+          0.57837,
+          0.59078,
+          0.59392
+        ]
+      }
+    },
+    "per_seed": [
+      {
+        "seed": 0,
+        "params": 15608,
+        "best_val_mse": 0.64898,
+        "test_mse": 0.67172,
+        "test_mae": 0.63198,
+        "epochs_run": 8
+      },
+      {
+        "seed": 1,
+        "params": 15608,
+        "best_val_mse": 0.60502,
+        "test_mse": 0.61625,
+        "test_mae": 0.58396,
+        "epochs_run": 28
+      },
+      {
+        "seed": 2,
+        "params": 15608,
+        "best_val_mse": 0.60599,
+        "test_mse": 0.6135,
+        "test_mae": 0.57837,
+        "epochs_run": 30
+      },
+      {
+        "seed": 3,
+        "params": 15608,
+        "best_val_mse": 0.60591,
+        "test_mse": 0.61797,
+        "test_mae": 0.59078,
+        "epochs_run": 23
+      },
+      {
+        "seed": 4,
+        "params": 15608,
+        "best_val_mse": 0.60901,
+        "test_mse": 0.63074,
+        "test_mae": 0.59392,
+        "epochs_run": 23
+      }
+    ]
+  }
+}

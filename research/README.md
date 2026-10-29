@@ -692,6 +692,73 @@ ladder without attention, or a re-justified criterion for attention-carrying
 variants) must be re-registered as Round 4b before any further run — that
 is a decision to be approved, not slipped through.
 
+## Round 4b: plan and stop-loss (re-registered before any run)
+
+Decision after the pre-flight failure, fixed by review: **option A** — the
+ladder without attention.  The reviewer's rationale, recorded because it
+binds this and every future round: a criterion that failed must not be
+renegotiated after the fact; the value of pre-registration is precisely
+that it cannot be revised retroactively — otherwise, six months later (or
+at review), "plan followed" and "plan bent around the result" become
+indistinguishable.
+
+**Protocol success, recorded explicitly:** the Round-4 stop-loss worked as
+designed.  A pre-flight that blocks a launch is the protocol succeeding,
+not Round 4 failing.
+
+**Findings carried into the record independently of Round 4b's outcome:**
+
+1. **Attention finding (separate item, not a Round-4 component):**
+   attention acts as a strong regularizer on the synthetic probe — train
+   x3.7 (0.0305 -> 0.1114), test 0.62 -> 0.13; it blocks overfitting by
+   construction.
+2. **Calibration fact:** full 0.111 vs rot 0.036 — the context pull
+   constrains fitting ~3x.  True whether or not attention ships.
+3. **Open question, reserved for a separate pre-registration:** can the
+   attention regularizer learn the real-task signal (2,500 sequences, a
+   different regime than the 300-sequence probe)?  A model that cannot
+   overfit the probe has no demonstrated ability to fit a real task.  New
+   hypothesis, new gate — not a revision of Round 4.
+
+**Ladder (all passed the registered 0.10 pre-flight):** rot 0.0357,
+chain 0.0361, gate 0.0294, chain_gate 0.0305.
+
+**One new hypothesis, registered here, same 0.10 bar:** `gate_attn_low` —
+gate + attention with a *fixed 0.1x pull coefficient* (suspected culprit:
+the pull's scale, not the mechanism).  It must pass the same pre-flight
+(probe, 100 epochs, min train MSE < 0.10) before joining the ladder.  If
+it passes and wins: regularization without the optimization blockage.  If
+it fails either gate: attention is disqualified as a component and remains
+a finding.  This is "add a hypothesis", not "change the criterion".
+
+**Fixed protocol:** nonlinear task, identical to Round 3.5 (2,500/600/600,
+T=64 H=12, 3 regimes, 30 epochs, patience 5, lr 2e-3, batch 64,
+diff-input, amplitude), **5 seeds {0,1,2,3,4} per variant**, mean +/- std
+reported; no per-variant tuning of any kind.  Winner = lowest *mean val*
+MSE, never test.
+
+**Stop-loss (fixed):**
+
+1. `gate_attn_low` pre-flight: probe min train < 0.10, else it is out of
+   the ladder and attention is disqualified as a component.
+2. Primary outcomes on the nonlinear task (test MSE, **mean over 5
+   seeds**):
+   - **rot alone <= 0.357 (GRU):** chain/gate are dead weight — "the toric
+     machinery is dead, the rotation is alive".  A valuable result.
+   - **only with chain and/or gate <= 0.357:** the components work;
+     decompose which one and interpret.
+   - **nothing <= 0.373 (MLP):** the project is closed for real, without
+     "almost".  (0.357 < mean <= 0.373: beats the MLP, misses the target —
+     reported as improvement, not victory.)
+3. Secondary gate (home turf, winner by mean val, 5 seeds, easy + hard at
+   the exact reference protocols): pass = beats old MMT on both tasks
+   (0.3852 easy, 0.4815 hard).  If the nonlinear winner does not transfer,
+   the README says exactly that — "success on nonlinear does not transfer
+   to home turf" — an open question, not a victory.
+4. Budget: up to 5 configs x 5 seeds (nonlinear) + 2 tasks x 5 seeds
+   (winner) + 3 probe runs (gate_attn_low).  Nothing beyond this; no
+   extensions, no tuning.
+
 ## Reproduce
 
 ```bash

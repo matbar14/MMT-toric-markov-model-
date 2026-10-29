@@ -30,9 +30,12 @@ bypass + diff inputs as the Round 3.5 reference.  The grafted pieces:
   toric attention minus quantization).
 
 Variants (--variant): ``rot`` (reference, no machinery), ``chain``,
-``gate``, ``chain_gate``, ``full`` (= chain + gate + attention).  The plan
-and stop-loss are pre-registered in ``research/README.md`` (Round 4
-section) and were committed before the first run.
+``gate``, ``chain_gate``, ``full`` (= chain + gate + attention), and the
+Round-4b hypothesis ``gate_attn_low`` (= gate + attention with a FIXED
+0.1x pull coefficient, registered to test whether the probe failure came
+from the pull's scale rather than the mechanism).  The plan and stop-loss
+are pre-registered in ``research/README.md`` (Round 4 / Round 4b sections)
+and were committed before the first run.
 
 Usage (repository root)::
 
@@ -71,11 +74,13 @@ from .toric_core import ToricMarkovChain, normalize, unit
 from .train_utils import count_parameters, evaluate, train_model
 
 VARIANTS = {
-    "rot": (False, False, False),
-    "chain": (True, False, False),
-    "gate": (False, True, False),
-    "chain_gate": (True, True, False),
-    "full": (True, True, True),
+    # name: (use_chain, use_gate, use_attention, fixed attention pull)
+    "rot": (False, False, False, 1.0),
+    "chain": (True, False, False, 1.0),
+    "gate": (False, True, False, 1.0),
+    "chain_gate": (True, True, False, 1.0),
+    "full": (True, True, True, 1.0),
+    "gate_attn_low": (False, True, True, 0.1),
 }
 
 
@@ -97,6 +102,7 @@ class PhaseHybridEncoder(nn.Module):
         use_chain: bool = False,
         use_gate: bool = False,
         use_attention: bool = False,
+        attn_pull: float = 1.0,
         use_amplitude: bool = False,
         use_diff_input: bool = False,
         dropout: float = 0.1,
@@ -106,6 +112,10 @@ class PhaseHybridEncoder(nn.Module):
         self.use_chain = use_chain
         self.use_gate = use_gate
         self.use_attention = use_attention
+        # Fixed (non-learnable) multiplier on the attention pull; 1.0
+        # reproduces the toric attention strength, 0.1 is the Round-4b
+        # "attention at low weight" hypothesis.
+        self.attn_pull = float(attn_pull)
         self.use_amplitude = use_amplitude
         self.use_diff_input = use_diff_input
         effective_features = num_features * 2 if use_diff_input else num_features
@@ -174,7 +184,7 @@ class PhaseHybridEncoder(nn.Module):
                 context = unit(self.ctx_angle)  # (D,)
                 score = (h * context.conj()).real  # (B, D) in [-1, 1]
                 weight = torch.sigmoid(score * self.attn_scale)
-                h = normalize(h + weight * context)
+                h = normalize(h + self.attn_pull * weight * context)
         hidden = torch.cat([h.real, h.imag], dim=-1)
         out = self.fusion(hidden)
         if self.use_amplitude:
@@ -196,6 +206,27 @@ class PhaseHybridForecaster(nn.Module):
         return self.head(self.encoder(features)).view(
             features.shape[0], self.horizon, self.num_channels
         )
+
+
+def _aggregate(entries: list[dict]) -> dict:
+    """Mean +/- std over per-seed entries (val/test metrics)."""
+    import statistics
+
+    def ms(key: str) -> dict:
+        vals = [e[key] for e in entries]
+        return {
+            "mean": round(statistics.mean(vals), 5),
+            "std": round(statistics.stdev(vals), 5) if len(vals) > 1 else 0.0,
+            "per_seed": vals,
+        }
+
+    return {
+        "n_seeds": len(entries),
+        "params": entries[0]["params"],
+        "best_val_mse": ms("best_val_mse"),
+        "test_mse": ms("test_mse"),
+        "test_mae": ms("test_mae"),
+    }
 
 
 def parse_floats(text: str) -> list[float]:
@@ -232,7 +263,7 @@ def main() -> None:
     parser.add_argument("--out", type=str, default="research/results_phase_hybrid.json")
     args = parser.parse_args()
 
-    use_chain, use_gate, use_attention = VARIANTS[args.variant]
+    use_chain, use_gate, use_attention, attn_pull = VARIANTS[args.variant]
 
     if args.task == "probe":
         n_train, n_val, n_test = args.n_train or 300, args.n_val or 100, args.n_test or 100
@@ -276,14 +307,14 @@ def main() -> None:
             num_channels=train_x.shape[-1],  # proper multi-channel head
             dim_angles=args.dim, kick_hidden=args.kick_hidden,
             num_states=args.states, use_chain=use_chain, use_gate=use_gate,
-            use_attention=use_attention, use_amplitude=args.amplitude,
-            use_diff_input=args.diff_input,
+            use_attention=use_attention, attn_pull=attn_pull,
+            use_amplitude=args.amplitude, use_diff_input=args.diff_input,
         )
 
     results: dict = {
         "config": {**vars(args), "n_train": n_train, "n_val": n_val, "n_test": n_test,
                    "use_chain": use_chain, "use_gate": use_gate,
-                   "use_attention": use_attention},
+                   "use_attention": use_attention, "attn_pull": attn_pull},
         "mean_predictor_val_mse": round(mean_val_mse, 5),
     }
 
@@ -330,28 +361,38 @@ def main() -> None:
               f"  test {best['test_mse']:.4f}")
         print("pre-flight gate: min train MSE < 0.10 required to launch Round 4")
     else:
-        torch.manual_seed(args.seed)
-        np.random.seed(args.seed)
-        model = build()
-        params = count_parameters(model)
-        print(f"[{args.variant}] params={params:,}")
-        outcome = train_model(
-            model, train_x, train_y, val_x, val_y,
-            epochs=epochs, batch_size=args.batch, lr=args.lr,
-            patience=patience, seed=args.seed, log=True,
-        )
-        test_mse, test_mae = evaluate(model, test_x, test_y)
-        results[args.variant] = {
-            "params": params,
-            "best_val_mse": round(outcome["best_val_mse"], 5),
-            "test_mse": round(test_mse, 5),
-            "test_mae": round(test_mae, 5),
-        }
+        seed_list = parse_ints(args.seeds) if args.seeds else [args.seed]
+        entries: list[dict] = []
+        for seed in seed_list:
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            model = build()
+            params = count_parameters(model)
+            outcome = train_model(
+                model, train_x, train_y, val_x, val_y,
+                epochs=epochs, batch_size=args.batch, lr=args.lr,
+                patience=patience, seed=seed, log=False,
+            )
+            test_mse, test_mae = evaluate(model, test_x, test_y)
+            entry = {
+                "seed": seed,
+                "params": params,
+                "best_val_mse": round(outcome["best_val_mse"], 5),
+                "test_mse": round(test_mse, 5),
+                "test_mae": round(test_mae, 5),
+                "epochs_run": len([h for h in outcome["history"] if "train_mse" in h]),
+            }
+            entries.append(entry)
+            print(f"    [{args.variant}] seed={seed} val={entry['best_val_mse']:.4f}"
+                  f"  test={entry['test_mse']:.4f}  ({entry['epochs_run']} ep)", flush=True)
+        agg = _aggregate(entries)
+        results[args.variant] = {"aggregate": agg, "per_seed": entries}
+        print(f"\n[{args.variant}] test mse {agg['test_mse']['mean']:.4f}"
+              f" +/- {agg['test_mse']['std']:.4f}  (val {agg['best_val_mse']['mean']:.4f}"
+              f" +/- {agg['best_val_mse']['std']:.4f}, {agg['n_seeds']} seeds)")
         if args.task == "nonlinear":
-            print(f"\n[{args.variant}] test mse={test_mse:.4f}"
-                  f"  (targets: GRU 0.3567 | old MMT 0.3878 | stop-loss > 0.388)")
-        else:
-            print(f"\n[{args.variant}] test mse={test_mse:.4f}")
+            print("    targets: GRU 0.3567 | MLP 0.3725 | old MMT 0.3878"
+                  " | stop-loss: nothing > 0.373")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

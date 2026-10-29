@@ -5,6 +5,9 @@ answers one question honestly: *does the invented architecture earn its
 complexity anywhere?* Everything here is reproducible from a fresh clone with
 CPU-only PyTorch, in minutes.
 
+**Status: CLOSED** — Round 4b confirmed the registered closure branch;
+see "Round 4b outcome" and "Project closed" at the end of this file.
+
 ## Contents
 
 | File | Purpose |
@@ -759,12 +762,16 @@ MSE, never test.
    (winner) + 3 probe runs (gate_attn_low).  Nothing beyond this; no
    extensions, no tuning.
 
-### Round 4b outcome: primary gate -> closure branch
+### Round 4b outcome: closure branch confirmed — project closed (final)
 
-`gate_attn_low` passed its pre-flight (probe min train **0.0313** at lr
-3e-3 < 0.10; also 0.0743 at 1e-3, 0.0343 at 1e-2) and joined the ladder —
-the pull's *scale*, not the mechanism, was the probe blocker.  Nonlinear
-task, fixed protocol, 5 seeds each (mean +/- std):
+Round 4b is **closed per the registration**: `gate_attn_low` = **0.3799
++/- 0.0049**, above the closure threshold MLP 0.3725; the closure branch
+is confirmed and home-turf was not launched (registered as conditional on
+a primary win).  `gate_attn_low` had passed its pre-flight (probe min
+train **0.0313** at lr 3e-3 < 0.10; also 0.0743 at 1e-3, 0.0343 at 1e-2)
+and joined the ladder — the pull's *scale*, not the mechanism, was the
+probe blocker.  Nonlinear task, fixed protocol, 5 seeds each
+(mean +/- std):
 
 | variant | val MSE | **test MSE** | params |
 |---------|---------|--------------|--------|
@@ -774,52 +781,58 @@ task, fixed protocol, 5 seeds each (mean +/- std):
 | chain_gate | 0.6139 | 0.6262 +/- 0.0248 | 16,336 |
 | **gate_attn_low** | **0.3945** | **0.3799 +/- 0.0049** | 15,897 |
 
-References: GRU 0.3567 (target) | MLP 0.3725 | **old MMT 0.3878** |
-MoE-linear 0.3957.
+References: GRU 0.3567 (target) | MLP 0.3725 (closure threshold) | old MMT
+0.3878 | MoE-linear 0.3957.
 
-Check against the registered outcomes:
+Against the registered branches: rot alone <= 0.357 — **no** (0.6300);
+ladder with chain/gate <= 0.357 — **no** (0.6221-0.6408); nothing <= 0.373
+(MLP) — **correct**, best mean 0.3799.  The budget was respected exactly
+(5 configs x 5 seeds + 3 probe runs, nothing else).
 
-1. rot alone <= 0.357?  **No** (0.6300).
-2. only with chain and/or gate <= 0.357?  **No** (0.6221-0.6408).
-3. nothing <= 0.373 (MLP)?  **Correct** — the best mean is 0.3799.
+**Structural finding (more important than the closure itself).**  All
+non-attention variants fail identically: rot 0.6300, chain 0.6408,
+gate 0.6221, chain_gate 0.6262.  Only `gate_attn_low` works.  The
+attention regularizer pulls the failing rotation out of the unlearned
+regime; the toric component is not load-bearing.  Functionally
+`gate_attn_low` is a small MLP with an attention regularizer — the
+"toric" in the name is cosmetics.
 
-=> **The closure branch applies: the project is closed for real, without
-"almost".**  The secondary home-turf gate was registered as conditional on
-a primary win and was therefore **not run**; the budget was respected
-exactly (5 configs x 5 seeds + 3 probe runs, nothing else).
+**Statistical note.**  `gate_attn_low` is statistically **tied** with MLP
+(0.3725) and the old MMT (0.3878): the gaps are ~1.5 std against a seed
+std of 0.0049 — within noise.  The only significant differences are
+against rot/chain/gate/chain_gate (0.62).  Not "beats" — "matches".
 
-What the round was for — the decomposition is decisive:
-
-1. **chain and gate are dead weight on the nonlinear task.**  rot 0.630,
-   chain 0.641, gate 0.622, chain_gate 0.626 — all four cluster within
-   noise of each other and far below every learned baseline.  The discrete
-   regime machinery adds nothing measurable even in its fully
-   differentiable form.
-2. **The only component that moves the task from "unlearned" (~0.63) to
-   "learned" (0.380) is the attention pull at low weight.**  gate_attn_low
-   differs from chain_gate by nothing except the fixed 0.1x context pull.
-3. gate_attn_low beats the old MMT (0.3878) and MoE-linear (0.3957) with
-   16k params (MMT: 41k), and misses the MLP by 2.0% and GRU by 6.5%.
-
-The attention finding, updated with Round 4b (still a finding, recorded
-as such — not a component negotiated back into a round):
+**Attention finding (kept separate from the toric claims).**  Monotonic
+trade-off in the pull coefficient 0 -> 0.1 -> 1.0: train 0.035 / 0.031 /
+0.111, test 0.65 / 0.365 / 0.13.  A small attention pull regularizes
+without blocking optimization; a large one blocks it.  This is a result
+about attention regularization, not about toric models — reserved for a
+separate note.
 
 | pull coefficient | probe train | probe test | nonlinear test |
 |------------------|-------------|------------|----------------|
-| 0 (absent) | 0.029-0.036 | 0.59-0.65 | 0.622-0.641 |
-| 0.1 (fixed) | 0.0313 | 0.3651 | **0.3799 +/- 0.0049** |
-| 1.0 (learnable, toric) | 0.1114 | 0.1316 | not run (closed) |
+| 0 (rot, no attention) | 0.0357 | 0.6511 | 0.6300 |
+| 0.1 (fixed, `gate_attn_low`) | 0.0313 | 0.3651 | **0.3799 +/- 0.0049** |
+| 1.0 (learnable, full) | 0.1114 | 0.1316 | not run (closed) |
 
-The pull scale separates "can fit" from "can generalize", and at 0.1x it
-is the only registered mechanism that learned the regime-conditional
-dynamics at all.  The reviewer-reserved open question — can the attention
-regularizer learn a real-task signal — now has evidence on both synthetic
-tasks; on real data (ETTh1) it remains untested and requires its own
-pre-registration.
+## Project closed
 
-Status: **per the registered stop-loss, the project closes.**  Any Round 5
-(pull-scale schedule, attention on ETTh1, or any other hypothesis) needs a
-new pre-registration approved before launch.
+Per the registered stop-loss, the project is closed for real, without
+"almost".  The stop-loss firing is the protocol working as registered —
+that is the success here, not the Round 4 runs.  Findings kept from this
+repo:
+
+1. **Harness defect** — the silent broadcast head; Rounds 1-3 synthetic
+   numbers were the cross-channel-mean floor (found and re-run in
+   Round 3.5).
+2. **ETTh1 residual ceiling** — LightGBM test ~= shuffle floor; DLinear
+   remains the ceiling for tree-based residual models.
+3. **Attention regularization curve** — the pull 0 -> 0.1 -> 1.0
+   trade-off above.
+4. **probe_state** — the regime is linearly decodable from the phase
+   state (0.987) but not from the model's own chain posterior (0.363).
+
+There is no next round under this registration.
 
 ## Reproduce
 

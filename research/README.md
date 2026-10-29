@@ -650,6 +650,48 @@ produced the reference numbers).
    (easy <= 0.176, hard <= 0.393); failure on either task => the machinery
    is task-specific and is reported as such.
 
+### Round 4 outcome: pre-flight gate FAILED — nothing launched
+
+The pre-flight was run exactly as registered (`phase_hybrid.py`, committed
+before any run; probe protocol identical to the Round 3.5 control: 300
+sequences, 100 epochs, no early stopping, plain features, seed 7 data).
+
+| variant | min train MSE (100 ep) | probe test MSE | pre-flight (< 0.10) |
+|---------|------------------------|----------------|---------------------|
+| rot | 0.0357 (lr 3e-3) | 0.6511 | (reference, passes) |
+| chain | 0.0361 | 0.6299 | passes (diagnostic) |
+| gate | 0.0294 | 0.5945 | passes (diagnostic) |
+| chain_gate | 0.0305 | 0.6181 | passes (diagnostic) |
+| **full** | **0.1114 / 0.1124 / 0.1230** (lr 3e-3 / 1e-2 / 1e-3) | **0.1316** | **FAILS** |
+
+Per the fixed stop-loss, the primary gate did **not** launch: no nonlinear
+runs, no home-turf runs, no seed 1.  The post-mortem diagnostics (cheap
+probes of the remaining ladder, same budget) localize the failure:
+
+1. **The blocker is the attention pull.**  `chain` and `gate` are
+   optimization-neutral (train 0.029-0.036, indistinguishable from `rot`),
+   and `chain_gate` fits fine (0.0305).  Adding attention to `chain_gate`
+   multiplies the probe train MSE by 3.7x (0.0305 -> 0.1114), consistently
+   across all three learning rates.  The Round-3.5 claim "the remaining
+   optimization gap is carried by the discrete / quantized / gated
+   machinery" must be corrected: quantization-free chain and gate do NOT
+   impede fitting — the context-phase pull does.
+2. **The same attention is the strongest regularizer seen so far.**  With
+   attention, the probe test MSE drops from ~0.59-0.65 (every other
+   variant, all of which memorize the 300 sequences) to **0.1316** — a 4.5x
+   generalization improvement, while train stays at 0.11.  The context
+   pull constrains the dynamics enough to prevent memorization entirely.
+3. For calibration: `full` at 0.111 still fits the probe **2x better than
+   the fixed MMT itself** (train 0.217-0.269) while carrying the same
+   machinery plus attention.  The 0.10 threshold was calibrated against
+   the bare differentiable recurrences (0.03), not against
+   machinery-carrying models.
+
+Status: **Round 4 is closed as pre-registered.**  Any continuation (a
+ladder without attention, or a re-justified criterion for attention-carrying
+variants) must be re-registered as Round 4b before any further run — that
+is a decision to be approved, not slipped through.
+
 ## Reproduce
 
 ```bash
@@ -717,6 +759,18 @@ python -m research.phase_rnn --task nonlinear --kick linear --epochs 30 --patien
     --diff-input --amplitude --seed 0 --out research/results_phase_rnn_nonlinear_linear.json
 python -m research.ett_residual_lgbm --base-epochs 8 --seeds 0,1,2 \
     --stride-train 3 --stride-val 6 --out research/results_ett_residual_lgbm.json
+
+# Round 4 (pre-flight + post-mortem probes only; the primary gate was NOT launched)
+python -m research.phase_hybrid --task probe --variant full --lrs 1e-3,3e-3,1e-2 --seeds 0 \
+    --epochs 100 --out research/results_round4_probe_full.json
+python -m research.phase_hybrid --task probe --variant rot --lrs 3e-3 --seeds 0 \
+    --epochs 100 --out research/results_round4_probe_rot.json
+python -m research.phase_hybrid --task probe --variant chain --lrs 3e-3 --seeds 0 \
+    --epochs 100 --out research/results_round4_probe_chain.json
+python -m research.phase_hybrid --task probe --variant gate --lrs 3e-3 --seeds 0 \
+    --epochs 100 --out research/results_round4_probe_gate.json
+python -m research.phase_hybrid --task probe --variant chain_gate --lrs 3e-3 --seeds 0 \
+    --epochs 100 --out research/results_round4_probe_chain_gate.json
 ```
 
 Result JSON files are committed next to this README.

@@ -1,0 +1,56 @@
+{
+  "config": {
+    "task": "probe",
+    "variant": "chain",
+    "kick_hidden": 64,
+    "dim": 48,
+    "states": 8,
+    "n_train": 300,
+    "n_val": 100,
+    "n_test": 100,
+    "seq": 64,
+    "horizon": 12,
+    "epochs": 100,
+    "batch": 64,
+    "lr": 0.002,
+    "patience": 5,
+    "lrs": "3e-3",
+    "seeds": "0",
+    "speed_scale": 1.0,
+    "amplitude": false,
+    "diff_input": false,
+    "seed": 0,
+    "out": "research/results_round4_probe_chain.json",
+    "use_chain": true,
+    "use_gate": false,
+    "use_attention": false
+  },
+  "mean_predictor_val_mse": 0.56785,
+  "runs": {
+    "lr0.003_seed0": {
+      "lr": 0.003,
+      "seed": 0,
+      "params": 23080,
+      "epochs_run": 100,
+      "min_train_mse": 0.0361,
+      "final_train_mse": 0.0375,
+      "best_val_mse": 0.63863,
+      "test_mse": 0.6299,
+      "test_mae": 0.67814,
+      "train_seconds": 24.7
+    },
+    "best": {
+      "lr": 0.003,
+      "seed": 0,
+      "params": 23080,
+      "epochs_run": 100,
+      "min_train_mse": 0.0361,
+      "final_train_mse": 0.0375,
+      "best_val_mse": 0.63863,
+      "test_mse": 0.6299,
+      "test_mae": 0.67814,
+      "train_seconds": 24.7,
+      "config_key": "lr0.003_seed0"
+    }
+  }
+}

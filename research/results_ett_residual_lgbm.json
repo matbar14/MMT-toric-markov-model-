@@ -1,0 +1,381 @@
+{
+  "config": {
+    "data_dir": "data/ETT-small",
+    "base_epochs": 8,
+    "batch": 128,
+    "lr": 0.002,
+    "patience": 2,
+    "stride_train": 3,
+    "stride_val": 6,
+    "num_estimators": 250,
+    "seed": 0,
+    "out": "research/results_ett_residual_lgbm.json"
+  },
+  "base": {
+    "best_val_mse": 0.65662,
+    "test_mse": 0.39044,
+    "test_mae": 0.40477
+  },
+  "residual": {
+    "val_mse_before": 0.65662,
+    "val_mse_after_lgbm": 0.64041,
+    "overall_r2_val": 0.0247
+  },
+  "full_model": {
+    "val_mse": 0.64041,
+    "test_mse": 0.38431,
+    "test_mae": 0.40536
+  },
+  "channels": [
+    {
+      "channel": "HUFL",
+      "residual_val_mse_before": 0.6457,
+      "residual_val_mse_after": 0.60756,
+      "residual_r2_val": 0.0591,
+      "best_iteration": 17,
+      "top_features_by_gain": [
+        {
+          "feature": "w_mean",
+          "gain": 48118.0
+        },
+        {
+          "feature": "w_std",
+          "gain": 38880.5
+        },
+        {
+          "feature": "w_mad",
+          "gain": 30653.0
+        },
+        {
+          "feature": "cal2",
+          "gain": 28878.7
+        },
+        {
+          "feature": "w_rms24",
+          "gain": 23413.2
+        },
+        {
+          "feature": "cal1",
+          "gain": 8626.1
+        },
+        {
+          "feature": "cal3",
+          "gain": 7898.8
+        },
+        {
+          "feature": "step",
+          "gain": 5723.7
+        },
+        {
+          "feature": "cal0",
+          "gain": 2448.4
+        },
+        {
+          "feature": "lag95",
+          "gain": 958.4
+        }
+      ],
+      "seconds": 11.8
+    },
+    {
+      "channel": "HULL",
+      "residual_val_mse_before": 0.76481,
+      "residual_val_mse_after": 0.76891,
+      "residual_r2_val": -0.0054,
+      "best_iteration": 1,
+      "top_features_by_gain": [
+        {
+          "feature": "w_mean",
+          "gain": 3462.0
+        },
+        {
+          "feature": "w_std",
+          "gain": 3422.7
+        },
+        {
+          "feature": "w_rms24",
+          "gain": 1958.6
+        },
+        {
+          "feature": "cal2",
+          "gain": 1644.8
+        },
+        {
+          "feature": "w_mad",
+          "gain": 1525.8
+        },
+        {
+          "feature": "lag9",
+          "gain": 573.2
+        },
+        {
+          "feature": "lag11",
+          "gain": 466.3
+        },
+        {
+          "feature": "w_last",
+          "gain": 255.2
+        },
+        {
+          "feature": "lag3",
+          "gain": 210.4
+        },
+        {
+          "feature": "lag1",
+          "gain": 194.3
+        }
+      ],
+      "seconds": 9.6
+    },
+    {
+      "channel": "MUFL",
+      "residual_val_mse_before": 0.65171,
+      "residual_val_mse_after": 0.61688,
+      "residual_r2_val": 0.0534,
+      "best_iteration": 18,
+      "top_features_by_gain": [
+        {
+          "feature": "w_std",
+          "gain": 44227.3
+        },
+        {
+          "feature": "w_mean",
+          "gain": 39423.6
+        },
+        {
+          "feature": "w_mad",
+          "gain": 38786.5
+        },
+        {
+          "feature": "cal2",
+          "gain": 28587.8
+        },
+        {
+          "feature": "w_rms24",
+          "gain": 20957.4
+        },
+        {
+          "feature": "cal3",
+          "gain": 9156.0
+        },
+        {
+          "feature": "cal1",
+          "gain": 8385.9
+        },
+        {
+          "feature": "step",
+          "gain": 6652.9
+        },
+        {
+          "feature": "cal0",
+          "gain": 2138.9
+        },
+        {
+          "feature": "lag95",
+          "gain": 1458.3
+        }
+      ],
+      "seconds": 10.9
+    },
+    {
+      "channel": "MULL",
+      "residual_val_mse_before": 0.73404,
+      "residual_val_mse_after": 0.73104,
+      "residual_r2_val": 0.0041,
+      "best_iteration": 6,
+      "top_features_by_gain": [
+        {
+          "feature": "w_mean",
+          "gain": 14079.5
+        },
+        {
+          "feature": "w_mad",
+          "gain": 7975.0
+        },
+        {
+          "feature": "w_std",
+          "gain": 6480.2
+        },
+        {
+          "feature": "cal2",
+          "gain": 5002.0
+        },
+        {
+          "feature": "w_rms24",
+          "gain": 3721.3
+        },
+        {
+          "feature": "cal3",
+          "gain": 2636.4
+        },
+        {
+          "feature": "lag1",
+          "gain": 2272.8
+        },
+        {
+          "feature": "lag4",
+          "gain": 1606.8
+        },
+        {
+          "feature": "lag10",
+          "gain": 1534.0
+        },
+        {
+          "feature": "step",
+          "gain": 1525.1
+        }
+      ],
+      "seconds": 10.6
+    },
+    {
+      "channel": "LUFL",
+      "residual_val_mse_before": 0.90595,
+      "residual_val_mse_after": 0.9118,
+      "residual_r2_val": -0.0065,
+      "best_iteration": 1,
+      "top_features_by_gain": [
+        {
+          "feature": "w_mean",
+          "gain": 4539.0
+        },
+        {
+          "feature": "w_rms24",
+          "gain": 3038.7
+        },
+        {
+          "feature": "w_std",
+          "gain": 2613.7
+        },
+        {
+          "feature": "cal2",
+          "gain": 2511.8
+        },
+        {
+          "feature": "w_mad",
+          "gain": 1760.5
+        },
+        {
+          "feature": "cal0",
+          "gain": 1486.0
+        },
+        {
+          "feature": "step",
+          "gain": 1382.2
+        },
+        {
+          "feature": "lag90",
+          "gain": 1317.5
+        },
+        {
+          "feature": "cal3",
+          "gain": 1108.2
+        },
+        {
+          "feature": "lag51",
+          "gain": 1030.7
+        }
+      ],
+      "seconds": 8.4
+    },
+    {
+      "channel": "LULL",
+      "residual_val_mse_before": 0.79148,
+      "residual_val_mse_after": 0.74529,
+      "residual_r2_val": 0.0584,
+      "best_iteration": 14,
+      "top_features_by_gain": [
+        {
+          "feature": "w_mad",
+          "gain": 70849.3
+        },
+        {
+          "feature": "w_std",
+          "gain": 61386.7
+        },
+        {
+          "feature": "cal2",
+          "gain": 34570.1
+        },
+        {
+          "feature": "w_mean",
+          "gain": 28383.0
+        },
+        {
+          "feature": "lag2",
+          "gain": 11777.2
+        },
+        {
+          "feature": "step",
+          "gain": 10681.1
+        },
+        {
+          "feature": "lag94",
+          "gain": 10119.1
+        },
+        {
+          "feature": "w_rms24",
+          "gain": 9702.2
+        },
+        {
+          "feature": "lag25",
+          "gain": 9547.1
+        },
+        {
+          "feature": "lag0",
+          "gain": 3570.4
+        }
+      ],
+      "seconds": 10.7
+    },
+    {
+      "channel": "OT",
+      "residual_val_mse_before": 0.10262,
+      "residual_val_mse_after": 0.10141,
+      "residual_r2_val": 0.0117,
+      "best_iteration": 2,
+      "top_features_by_gain": [
+        {
+          "feature": "w_std",
+          "gain": 4996.9
+        },
+        {
+          "feature": "w_mad",
+          "gain": 3687.7
+        },
+        {
+          "feature": "w_mean",
+          "gain": 3060.6
+        },
+        {
+          "feature": "lag84",
+          "gain": 2491.5
+        },
+        {
+          "feature": "lag90",
+          "gain": 2310.0
+        },
+        {
+          "feature": "w_rms24",
+          "gain": 1933.3
+        },
+        {
+          "feature": "cal2",
+          "gain": 1370.4
+        },
+        {
+          "feature": "step",
+          "gain": 1206.8
+        },
+        {
+          "feature": "lag1",
+          "gain": 950.3
+        },
+        {
+          "feature": "lag4",
+          "gain": 896.0
+        }
+      ],
+      "seconds": 9.7
+    }
+  ]
+}

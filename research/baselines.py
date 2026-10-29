@@ -98,6 +98,95 @@ class TransformerForecaster(nn.Module):
         )
 
 
+class MLPForecaster(nn.Module):
+    """Flattened-window MLP: the plainest generic nonlinear learner.
+
+    Control model for the question "is the failure specific to recurrent /
+    phase machinery, or does ANY nonlinear model fit the data?".  A
+    two-hidden-layer perceptron over the flattened window has full expressive
+    freedom over the (T x C) -> (H x C) map and no temporal weight sharing, so
+    when it fails on small data the bottleneck is gradient difficulty, not the
+    architecture family.
+    """
+
+    def __init__(
+        self,
+        seq_len: int,
+        horizon: int,
+        num_channels: int = 1,
+        hidden_dim: int = 128,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.horizon = horizon
+        self.num_channels = num_channels
+        self.net = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(seq_len * num_channels, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, horizon * num_channels),
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.net(features).view(
+            features.shape[0], self.horizon, self.num_channels
+        )
+
+
+class MoELinearForecaster(nn.Module):
+    """Mixture of linear experts with a small nonlinear gate.
+
+    The minimal model with an explicit soft regime mechanism: each expert is a
+    (channel-shared) linear map from the flattened window to the forecast, and
+    a two-layer MLP gate computes regime posteriors from the same window.  If
+    the right inductive bias for regime-conditional data is "identify the
+    regime, then apply a linear predictor", this model should capture it
+    without any phase machinery — it is the reference the toric core has to
+    beat to justify its complexity.  Note the gate is deliberately nonlinear:
+    regime evidence such as signal envelope is a quadratic function of the
+    window, which a purely linear gate could not represent.
+    """
+
+    def __init__(
+        self,
+        seq_len: int,
+        horizon: int,
+        num_channels: int = 1,
+        num_experts: int = 3,
+        gate_hidden: int = 64,
+    ) -> None:
+        super().__init__()
+        if num_experts <= 0:
+            raise ValueError("num_experts must be positive")
+        self.horizon = horizon
+        self.num_channels = num_channels
+        self.num_experts = num_experts
+        flat_dim = seq_len * num_channels
+        self.gate = nn.Sequential(
+            nn.Linear(flat_dim, gate_hidden),
+            nn.GELU(),
+            nn.Linear(gate_hidden, num_experts),
+        )
+        self.experts = nn.ModuleList(
+            [nn.Linear(flat_dim, horizon * num_channels) for _ in range(num_experts)]
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        flat = features.reshape(features.shape[0], -1)
+        weights = torch.softmax(self.gate(flat), dim=-1)  # (B, K)
+        expert_out = torch.stack(
+            [expert(flat) for expert in self.experts], dim=1
+        )  # (B, K, H*C)
+        forecast = (weights.unsqueeze(-1) * expert_out).sum(dim=1)
+        return forecast.view(
+            features.shape[0], self.horizon, self.num_channels
+        )
+
+
 def moving_avg(x: torch.Tensor, kernel_size: int) -> torch.Tensor:
     """Edge-padded moving average along the time axis; x is (B, T, C)."""
     front = (kernel_size - 1) // 2

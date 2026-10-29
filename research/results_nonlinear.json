@@ -1,0 +1,68 @@
+{
+  "config": {
+    "n_train": 2500,
+    "n_val": 600,
+    "n_test": 600,
+    "seq": 64,
+    "horizon": 12,
+    "regimes": 3,
+    "noise": 0.05,
+    "stickiness": 0.97,
+    "epochs": 30,
+    "batch": 64,
+    "lr": 0.002,
+    "patience": 5,
+    "dim": 48,
+    "states": 24,
+    "hidden": 64,
+    "kernel": "stochastic",
+    "no_quant": false,
+    "amplitude": true,
+    "diff_input": true,
+    "seed": 0,
+    "models": "dlinear,mlp,moe_linear,gru,naive,phase",
+    "out": "research/results_nonlinear_base.json"
+  },
+  "models": {
+    "dlinear": {
+      "params": 1560,
+      "best_val_mse": 0.63564,
+      "test_mse": 0.61235,
+      "test_mae": 0.59903
+    },
+    "mlp": {
+      "params": 36120,
+      "best_val_mse": 0.39252,
+      "test_mse": 0.37254,
+      "test_mae": 0.38055
+    },
+    "moe_linear": {
+      "params": 17739,
+      "best_val_mse": 0.40231,
+      "test_mse": 0.3957,
+      "test_mae": 0.39943
+    },
+    "gru": {
+      "params": 14220,
+      "best_val_mse": 0.84007,
+      "test_mse": 0.87374,
+      "test_mae": 0.74222
+    },
+    "persistence": {
+      "params": 0,
+      "test_mse": 2.80792,
+      "test_mae": 1.17239
+    },
+    "phase_readout": {
+      "params": 0,
+      "test_mse": 0.53108,
+      "test_mae": 0.365
+    },
+    "mmt": {
+      "params": 39878,
+      "best_val_mse": 0.85619,
+      "test_mse": 0.89635,
+      "test_mae": 0.75257
+    }
+  }
+}

@@ -31,6 +31,7 @@ from torch import nn
 
 from .baselines import (
     DLinearForecaster,
+    MLPForecaster,
     RecurrentForecaster,
     TransformerForecaster,
     drift_forecast,
@@ -107,6 +108,10 @@ def build_model(name: str, num_features: int, seq_len: int, horizon: int, args) 
         return RecurrentForecaster(
             num_features, horizon, kind=name,
             hidden_dim=args.hidden, use_diff_input=args.diff_input,
+        )
+    if name == "mlp":
+        return MLPForecaster(
+            seq_len, horizon, num_channels=num_features, hidden_dim=args.hidden * 2,
         )
     if name == "transformer":
         return TransformerForecaster(

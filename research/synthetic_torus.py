@@ -88,6 +88,9 @@ def simulate_switching_rotation(
 
 
 def build_model(name: str, num_features: int, seq_len: int, horizon: int, args) -> nn.Module:
+    # All heads must emit one value per (step, channel): num_channels equals the
+    # data width.  The 1-channel default silently broadcasts a single shared
+    # forecast across channels under mse_loss — the Round 1-3 harness bug.
     toric_kwargs = dict(
         dim_angles=args.dim,
         num_levels=2,
@@ -102,12 +105,14 @@ def build_model(name: str, num_features: int, seq_len: int, horizon: int, args) 
     )
     if name in ("mmt", "hybrid", "hybrid_res"):
         if name == "mmt":
-            return ToricForecaster(num_features, horizon, **toric_kwargs)
-        return HybridForecaster(num_features, seq_len, horizon, **toric_kwargs)
+            return ToricForecaster(num_features, horizon, num_channels=num_features,
+                                   **toric_kwargs)
+        return HybridForecaster(num_features, seq_len, horizon,
+                                num_channels=num_features, **toric_kwargs)
     if name in ("gru", "lstm"):
         return RecurrentForecaster(
-            num_features, horizon, kind=name,
-            hidden_dim=args.hidden, use_diff_input=args.diff_input,
+            num_features, horizon, num_channels=num_features,
+            kind=name, hidden_dim=args.hidden, use_diff_input=args.diff_input,
         )
     if name == "mlp":
         return MLPForecaster(
@@ -115,7 +120,8 @@ def build_model(name: str, num_features: int, seq_len: int, horizon: int, args) 
         )
     if name == "transformer":
         return TransformerForecaster(
-            num_features, horizon, d_model=args.hidden, use_diff_input=args.diff_input,
+            num_features, horizon, num_channels=num_features,
+            d_model=args.hidden, use_diff_input=args.diff_input,
         )
     if name == "dlinear":
         return DLinearForecaster(seq_len, horizon)

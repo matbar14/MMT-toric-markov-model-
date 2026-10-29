@@ -17,6 +17,8 @@ CPU-only PyTorch, in minutes.
 | `ett_experiment.py` | Real-data pilot: ETTh1, canonical 96->96 protocol |
 | `ett_residual_lgbm.py` | Roadmap item 2: LightGBM over lag/envelope/calendar features on the post-linear ETTh1 residual — is the residual machine-learnable at all? |
 | `overfit_budget.py` | Roadmap item 3: long-budget overfit probe (lr sweep x seeds x 200 epochs) on the 300-sequence task |
+| `probe_state.py` | Round 3.5 control 1: linear probes (regime / phase / forecast readout) on the frozen MMT state |
+| `phase_rnn.py` | Round 3.5 control 2: minimal fully-differentiable rotation recurrence — overfit probe + regime task |
 
 ## What was cleaned up vs the legacy core
 
@@ -36,6 +38,19 @@ CPU-only PyTorch, in minutes.
    (`--no-quant` uses a 16-bit grid) so its effect is measurable.
 
 ## Results
+
+> **Harness correction (Round 3.5).** Rounds 1–3 contained a harness bug:
+> on the synthetic tasks the forecast heads of MMT / GRU / LSTM /
+> Transformer / hybrid were built with the default `num_channels=1`, so the
+> model emitted a single `(B, H, 1)` series that `mse_loss` broadcast across
+> all channels.  Such a model can only predict the cross-channel mean
+> sequence; its best achievable loss is the cross-channel-mean floor (home-
+> turf easy task: ~0.47 — the observed "~0.50 plateau" was that floor, not a
+> gradient barrier).  `ett_experiment` was unaffected (it passes
+> `num_channels=7` explicitly), so **all ETTh1 numbers and all DLinear / MLP /
+> MoE-linear / persistence / drift / analytic-readout numbers below stand**;
+> every synthetic MMT / GRU / hybrid number in Rounds 1–3 is superseded by
+> the corrected Round 3.5 runs at the bottom of this file.
 
 ### 1. Home turf: Markov-switching rotation on a torus
 
@@ -231,7 +246,9 @@ Findings:
 3. **The toric model loses on a task built from its own assumptions.**  It
    trails the MLP by a factor of 2.4 and even the linear baseline by 46%.
    With exactly as many chain states as true regimes, the unsupervised chain
-   recovers them at 0.502 agreement (chance = 0.33) — above chance, far from
+   recovers them at 0.502 agreement (chance = 0.33; provenance: this is the
+   model's own argmax over its chain posterior — no trained probe involved)
+   — above chance, far from
    usable.  The no-learning phase readout beats every gradient-trained
    recurrent model: the failure is gradient descent on the phase-recurrent
    parameterization, not the information content of the task.
@@ -322,30 +339,249 @@ Findings:
    On the evidence collected in three rounds, it should not be used as a
    forecaster.
 
-## What to try next (revised after Round 3)
+## Round 3.5: harness correction, re-runs, and the two pre-Round-4 controls
 
-1. **If the goal is forecasting accuracy: use the MLP or MoE-linear and stop
-   paying the toric tax.**  On every task tested they dominate, and the
-   residual analysis bounds the remaining headroom to ~2.5%.
-2. **If the goal is the toric architecture itself, the optimization barrier
-   is the only thing worth working on**, and the 300-sequence overfit probe
-   (100 epochs, ~2 min per config on CPU) is the cheap regression test for
-   any proposed fix: a fix must drive train MSE materially below ~0.45
-   before anything larger is worth running.  Candidate fixes at the
-   parameterization level: make rotations differentiable end-to-end (drop or
-   relax the STE quantizer during training), initialize the phase dynamics
-   near identity with small learned kicks, train the toric core as a
-   correction on MLP features instead of raw inputs, or replace the
-   input-conditioned soft chain with a hard commit (Gumbel/STE) regime
-   sampler whose gradients bypass the recurrence entirely.
-3. **If the goal is interpretability, compare against the cheap alternative
-   first**: the MoE gate plus a clustering of its expert assignments gives
-   regime labels without any phase machinery; any interpretability claim for
-   the toric chain has to beat that baseline, not just chance (0.502 vs 0.33
-   here does not).
-4. A GPU-budget race (100+ epochs on the full 2,500-sequence task, wider lr
-   sweep) is only worth running *after* a parameterization fix passes the
-   overfit probe; the CPU evidence here is consistent across seeds and lrs.
+Three things happened between Round 3 and Round 4: the residual experiment
+was hardened with the controls a reviewer asks for (seeds, shuffle, direct
+fit), a **harness bug was found that invalidates the Round 1–3 optimization
+story**, and the two cheap pre-Round-4 controls were run.  All corrected
+result JSONs are committed next to this README (`*_fixed.json`,
+`results_probe_*.json`, `results_phase_rnn_*.json`, and the hardened
+`results_ett_residual_lgbm.json`).
+
+### The broadcast-head bug
+
+On the synthetic harnesses the heads of MMT / GRU / LSTM / Transformer /
+hybrid were constructed with the default `num_channels=1`.  Their output
+`(B, H, 1)` was silently broadcast across channels by `mse_loss`, so those
+models were trained to predict a *single shared series* fitted to the
+cross-channel mean of the targets.  Consequences, now measured:
+
+- The home-turf easy-task broadcast floor is ~0.47 — the "0.49–0.51
+  predict-the-mean plateau" of MMT and GRU in Rounds 1–3 was exactly that
+  floor.  It said nothing about gradient flow through phase dynamics.
+- `ett_experiment` already passed `num_channels=7`, so the ETTh1 table was
+  never affected.  DLinear (channel-shared map, correct output shape),
+  MLP and MoE-linear (constructed with explicit `num_channels`), the naive
+  predictors and the analytic readout were never affected.
+- The 0.502 regime-agreement figure is unaffected (it is produced by the
+  model itself — argmax of its chain posterior — and the posterior does not
+  pass through the head at all) — but see Control 1 below for what the
+  probes now say about it.
+
+All synthetic heads now emit `(B, H, C)` with `C` = number of channels.
+
+### Corrected headline tables
+
+Nonlinear regime task (`nonlinear_torus.py`, T=64, H=12, 2,500 sequences,
+30 epochs, seed 0 — fixed heads everywhere):
+
+| model | old (buggy head) | **fixed head** | params |
+|-------|-----------------|----------------|--------|
+| GRU (+diff) | 0.8737 | **0.3567** | 15,000 |
+| MLP (flattened window) | 0.3725 (valid) | 0.3725 | 36,120 |
+| MMT (toric, +diff, +amp) | 0.8963 | **0.3878** | 41,042 |
+| MoE-linear | 0.3957 (valid) | 0.3957 | 17,739 |
+| MMT (exactly 3 chain states) | 0.9236 | **0.4363** | 37,430 |
+| phase readout (no learning) | 0.5311 (valid) | 0.5311 | 0 |
+| phase-RNN, linear kick (Round-4 candidate) | — | 0.6386 | 12,408 |
+| DLinear | 0.6123 (valid) | 0.6123 | 1,560 |
+| phase-RNN, mlp kick (Round-4 candidate) | — | 0.6932 | 15,608 |
+| persistence | 2.8079 (valid) | 2.8079 | 0 |
+
+The Round 3 headline — "the toric model loses on a task built from its own
+assumptions, to every learned baseline" — was an artifact.  With a head that
+can address channels, the toric model lands within ~4% of the MLP and ~9% of
+the GRU, beats the minimal regime mechanism (MoE-linear) and beats the
+analytic readout by 27%.  The GRU-vs-MMT ordering (0.357 vs 0.388) is the
+honest remaining gap.
+
+Home-turf task (`synthetic_torus.py`, fixed heads; DLinear/persistence rows
+unchanged):
+
+| task | model | old | **fixed** |
+|------|-------|-----|-----------|
+| easy (T=64, H=12) | DLinear | 0.1112 | 0.1112 |
+| | GRU | 0.4915 | **0.1170** |
+| | persistence | 0.1272 | 0.1272 |
+| | MMT | 0.5187 | **0.3852** |
+| hard (T=96, H=24, speeds x2) | DLinear | 0.3388 | 0.3388 |
+| | GRU | 0.5043 | **0.2622** |
+| | MMT | 0.5324 | **0.4815** |
+| | persistence | 0.5574 | 0.5574 |
+
+The toric model still clearly loses the 8-channel home-turf tasks to GRU and
+DLinear — that gap survives the head fix and is an optimization gap (see
+next table), not an output-cap artifact.
+
+Overfit probe (300 sequences, 100 epochs, no early stopping, lr grid
+{1e-3, 3e-3, 1e-2} x seeds {0, 1} — fixed heads):
+
+| model | min train MSE | test MSE |
+|-------|---------------|----------|
+| GRU (fixed) | **0.0154** (lr 1e-2, s1) | 0.1077 |
+| MLP | 0.0290 | 0.1536 |
+| DLinear | 0.0959 | 0.0983 |
+| MMT (fixed) | 0.2173 – 0.2688 (all configs) | 0.2791 – 0.3122 |
+
+(mean-predictor val reference 0.5679; the old MMT "plateau" was 0.496–0.509
+against a broadcast floor of ~0.47.)  The toric model now trains well below
+the old plateau, and a much smaller but real optimization gap remains
+(train 0.22 vs 0.015–0.029 for the generic models).
+
+### Item 2, hardened: seeds, shuffle control, full trees, direct fit
+
+`ett_residual_lgbm.py` was extended: per-channel LightGBM on the frozen
+DLinear-base residual is now run over 3 booster seeds with a shuffle control
+(train targets row-permuted, val kept real), a no-early-stopping full-150-tree
+variant (removes the val-selection bias of the 1–18-tree fits), residual R^2
+on the never-touched test split, and a direct fit on the raw target (can
+boosting beat the linear base at all?).
+
+| quantity | value |
+|----------|-------|
+| residual R^2 (val, early stopping) | **+0.026 ± 0.001** (mean ± std, 3 booster seeds) |
+| residual R^2 (test, untouched by selection) | **−0.006 ± 0.005** (≈ 0: the val gain does not transfer) |
+| residual R^2 (val, 150 trees, no early stopping) | −0.127 ± 0.006 (ES was protecting, not underfitting) |
+| shuffle control (val R^2) | +0.000 ± 0.001 (the noise floor) |
+| direct LGBM on raw target, test MSE | 0.494 ± 0.001 (DLinear base: 0.390 — boosting loses by 27%) |
+| base + LGBM (early stopping), test MSE | 0.385 ± 0.002 (a Δ ≈ 0.005 gain, consistent with the ≈0 test R^2) |
+
+**Finding (rephrased per review):** LightGBM explains 2.6% ± 0.1% of the
+DLinear residual on val (mean ± std over seeds; shuffle control 0.0% ± 0.1%),
+but the same fits score −0.6% ± 0.5% on the never-touched test split — the
+val-side gain does not transfer.  Fitting the full 150 trees without early
+stopping makes val worse (−12.7%), so the 1–18-tree early stopping was a
+regularizer, not a conservative bias.  Trained directly on the raw target,
+boosting reaches test MSE 0.494 vs the linear base's 0.390.  The corrected
+claim: **on this benchmark, at this feature family (raw lags + envelope
+statistics + calendar phase), the per-channel linear base is the ceiling for
+gradient boosting; the small val-side residual signal is a val-split effect,
+and extrapolation structures of the residual are not covered by this test.**
+Trees do not extrapolate.
+
+### Control 1 — linear probes on the frozen MMT state (`probe_state.py`)
+
+The trained MMT (Round-3 protocol, fixed head) is frozen; linear probes are
+fit on four feature sets: the chain posterior `p_T`, the raw phase state
+(48 angles, before fusion), the head input (what the forecast head actually
+consumes), and the raw window.
+
+Regime recovery, states=3 model (best-permutation agreement vs the true
+regime; chance 0.33):
+
+| probe | agreement |
+|-------|-----------|
+| logistic on raw window | 0.3517 |
+| **model's own chain posterior, argmax** | **0.3633** |
+| logistic on chain posterior | 0.4733 |
+| logistic on head input | 0.9700 |
+| **logistic on phase state** | **0.9867** |
+
+Phase recovery (closed-form ridge on (cos theta_T, sin theta_T), true
+generator phase): angle error 0.069 rad / cos-sin R^2 0.979 on the head
+input; 0.045 rad / 0.992 on the raw window.
+
+Linear readout forecaster (closed-form ridge, frozen features -> 12x2):
+head input 0.3639 and state+posterior 0.3599 — both **below the trained
+MMT head** (0.3878) and below ridge on the raw window (0.4237); on the
+states=3 model the same holds (0.3803 vs head 0.4363).
+
+Three consequences:
+
+1. **The regime is almost perfectly linearly present in the phase state**
+   (0.987 vs 0.35 for a linear map on the raw window — the regime evidence
+   is deliberately nonlinear in the samples).  The interpretability claim
+   must be re-anchored: it is the *continuous phase state*, not the discrete
+   chain, that carries the regimes.  The chain posterior is barely better
+   than chance (0.363 own-argmax; 0.473 re-weighted by a logistic probe).
+2. **The state is better than its own head**: a single linear layer on the
+   frozen representation beats the trained nonlinear head and beats any
+   linear map on the raw window.  The encoder learned a genuinely useful
+   representation; the output path still leaves ~6–15% on the table.
+3. The Round-3 framing "the chain encodes the regimes but the head does not
+   decode them" was right in spirit but wrong in mechanism: the *phase state*
+   encodes them, the old head could not even address channels, and the
+   discrete chain contributes almost nothing measurable.
+
+### Control 2 — differentiable rotation, minimal probe (`phase_rnn.py`)
+
+The Round-4 candidate in its cheapest form: a continuous unit-modulus state
+advanced by input-conditioned learned angle kicks,
+
+`h_{t+1} = normalize(h_t * exp(i * (theta_base + f(x_t))))`, `h_0 = 1`,
+
+with f linear or a 2-layer MLP, no chain, no quantization, no attention —
+everything differentiable — followed by the same fusion + linear head.
+Same 300-sequence probe, same budget (100 epochs, no early stopping):
+
+| model | min train MSE | test MSE |
+|-------|---------------|----------|
+| phase-RNN (mlp kick), lr 1e-3 | 0.0333 / 0.0357 | ~0.65 |
+| phase-RNN (mlp kick), lr 3e-3 | 0.0333 – 0.0357 | ~0.65 |
+| phase-RNN (mlp kick), lr 1e-2 | 0.1598 | 0.5589 |
+| (old MMT broadcast plateau) | 0.496 – 0.509 | 0.513 – 0.530 |
+| (fixed MMT, best config) | 0.2301 | 0.2791 |
+| (MLP) | 0.0290 | 0.1536 |
+
+The differentiable rotation **fully memorizes the 300 sequences** (train
+0.033, 15.7 s per run) — the Round-3 "structural barrier of the phase-
+recurrent parameterization" does not exist for the differentiable form; what
+remains of the toric model's optimization gap is carried by its discrete /
+quantized / gated machinery.  The probe also exposes the trade: with this
+minimal recurrence the model overfits and generalizes poorly on the tiny
+task (test ~0.65), and on the full regime task it reaches only 0.64–0.69
+(the fixed MMT's chain/attention/gating is what buys 0.388 there).
+
+## Verdict (after Round 3.5)
+
+1. The Round-3 claims "the analytic phase readout without training beats the
+   trained MMT (0.531 vs 0.896)" and "the toric model loses on a task built
+   from its own assumptions" were **harness artifacts**: the trained model
+   was structurally limited to the cross-channel mean.  With a corrected
+   head, the trained toric model beats the analytic readout by 27% on the
+   same task and sits within 4% of the MLP and 9% of the GRU.
+2. The regime information lives in the **continuous phase state**, not in
+   the discrete chain: a linear probe recovers the regime from the state at
+   0.987 (chance 0.33; raw window 0.35; chain posterior 0.36–0.47), and a
+   linear readout on the state beats the trained head.  The barrier that
+   Round 3 attributed to "gradient descent on phase-recurrent dynamics" was
+   an output-layer bug; what remains is a smaller, real optimization gap
+   (probe train 0.22 vs 0.015–0.029), which a fully differentiable rotation
+   removes entirely in the probe (train 0.033).
+3. Hardened residual result: boosting over lag/envelope/calendar features
+   explains 2.6% ± 0.1% of the post-linear ETTh1 residual on val (shuffle
+   control 0.0% ± 0.1%) and ≈ 0% on test (−0.6% ± 0.5%); trained directly it
+   cannot approach the linear base (0.494 vs 0.390).  The linear base is the
+   ceiling **for this feature family**; extrapolation structures are not
+   covered by this test.
+4. Honest remaining gaps of the toric core: it still loses the 8-channel
+   home-turf tasks to GRU/DLinear by 3–4x (optimization, not output cap);
+   the discrete chain adds nothing measurable yet (posterior ≈ chance, and
+   the 3-state variant forecasts worse than the 24-state one); on ETTh1 it
+   remains far behind (1.087, a valid number).
+
+## What to try next (revised after Round 3.5)
+
+1. **Round 4 now has direct evidence behind it.**  The differentiable
+   rotation passes the 2-minute overfit probe (train 0.033 vs the toric
+   plateau 0.22); the next step is to combine the differentiable recurrence
+   with the regime machinery (chain / geodesic gate / attention) and re-run
+   the nonlinear task (target: beat 0.388) and the home-turf tasks (target:
+   close the 0.385 vs 0.117 gap).  The 300-sequence probe stays the
+   regression test: a candidate must fit materially below train ~0.1 before
+   anything larger is worth running.
+2. **The chain has to earn its place.**  Either feed the posterior to the
+   head (the probes show state+posterior >= state alone) or admit the
+   discrete state is dead weight; the 0.502 Round-3 agreement does not
+   survive the fix (0.363), and the regime story belongs to the phase state.
+3. **If the goal is forecasting accuracy on ETTh1**, the hardened Item 2
+   bounds what any residual-correction approach can add at this feature
+   family; a phase-based model must add value on the raw series, not on the
+   post-linear residual.
+4. The GPU-budget race is still gated on a parameterization fix passing the
+   overfit probe; with the corrected harness, the probe now measures what it
+   was always meant to measure.
 
 ## Reproduce
 
@@ -382,6 +618,38 @@ python -m research.ett_residual_lgbm --base-epochs 8 \
 python -m research.overfit_budget --models mmt,gru,mlp,dlinear \
     --lrs 1e-3,3e-3,1e-2 --seeds 0,1 --epochs 200 --patience 50 \
     --out research/results_overfit_budget.json
+
+# Round 3.5 (harness fix re-runs + pre-Round-4 controls + hardened item 2)
+python -m research.nonlinear_torus --models mmt --epochs 30 --patience 5 \
+    --diff-input --amplitude --seed 0 --out research/results_nonlinear_fixed.json
+python -m research.nonlinear_torus --models mmt --states 3 --epochs 30 --patience 5 \
+    --diff-input --amplitude --seed 0 --out research/results_nonlinear_states3_fixed.json
+python -m research.nonlinear_torus --models gru --epochs 30 --patience 5 \
+    --diff-input --amplitude --seed 0 --out research/results_nonlinear_fixed.json
+python -m research.synthetic_torus --models mmt,gru --epochs 6 --patience 2 \
+    --out research/results_synthetic_fixed.json
+python -m research.synthetic_torus --models mmt --epochs 25 --patience 5 \
+    --speed-scale 2.0 --horizon 24 --seq 96 --out research/results_synthetic_hard_fixed_mmt.json
+python -m research.synthetic_torus --models gru --epochs 25 --patience 5 \
+    --speed-scale 2.0 --horizon 24 --seq 96 --out research/results_synthetic_hard_fixed_gru.json
+python -m research.overfit_budget --models mmt \
+    --lrs 1e-3,3e-3,1e-2 --seeds 0,1 --epochs 100 --patience 100 \
+    --out research/results_ob_fixed_a.json   # plus --lrs 1e-2 into _b.json
+python -m research.overfit_budget --models gru \
+    --lrs 1e-3,3e-3,1e-2 --seeds 0,1 --epochs 100 --patience 100 \
+    --out research/results_ob_fixed_gru.json
+python -m research.probe_state --states 24 --epochs 30 --patience 5 \
+    --diff-input --amplitude --seed 0 --out research/results_probe_states24.json
+python -m research.probe_state --states 3 --epochs 30 --patience 5 \
+    --diff-input --amplitude --seed 0 --out research/results_probe_states3.json
+python -m research.phase_rnn --task probe --kick mlp --lrs 1e-3,3e-3 --seeds 0,1 \
+    --epochs 100 --out research/results_phase_rnn_probe_a.json   # plus --lrs 1e-2 into _b.json
+python -m research.phase_rnn --task nonlinear --kick mlp --epochs 30 --patience 5 \
+    --diff-input --amplitude --seed 0 --out research/results_phase_rnn_nonlinear.json
+python -m research.phase_rnn --task nonlinear --kick linear --epochs 30 --patience 5 \
+    --diff-input --amplitude --seed 0 --out research/results_phase_rnn_nonlinear_linear.json
+python -m research.ett_residual_lgbm --base-epochs 8 --seeds 0,1,2 \
+    --stride-train 3 --stride-val 6 --out research/results_ett_residual_lgbm.json
 ```
 
 Result JSON files are committed next to this README.

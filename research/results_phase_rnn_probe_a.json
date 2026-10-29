@@ -1,0 +1,90 @@
+{
+  "config": {
+    "task": "probe",
+    "kick": "mlp",
+    "kick_hidden": 64,
+    "dim": 48,
+    "n_train": 300,
+    "n_val": 100,
+    "n_test": 100,
+    "seq": 64,
+    "horizon": 12,
+    "epochs": 100,
+    "batch": 64,
+    "lr": 0.003,
+    "patience": 5,
+    "lrs": "1e-3,3e-3",
+    "seeds": "0,1",
+    "kernel": "stochastic",
+    "states": 24,
+    "no_quant": false,
+    "amplitude": false,
+    "diff_input": false,
+    "seed": 0,
+    "out": "research/results_phase_rnn_probe_a.json"
+  },
+  "mean_predictor_val_mse": 0.56785,
+  "runs": {
+    "lr0.001_seed0": {
+      "lr": 0.001,
+      "seed": 0,
+      "params": 22560,
+      "epochs_run": 100,
+      "min_train_mse": 0.06699,
+      "final_train_mse": 0.0696,
+      "best_val_mse": 0.70472,
+      "test_mse": 0.71856,
+      "test_mae": 0.70495,
+      "train_seconds": 15.6
+    },
+    "lr0.001_seed1": {
+      "lr": 0.001,
+      "seed": 1,
+      "params": 22560,
+      "epochs_run": 100,
+      "min_train_mse": 0.06879,
+      "final_train_mse": 0.07111,
+      "best_val_mse": 0.70899,
+      "test_mse": 0.69422,
+      "test_mae": 0.69387,
+      "train_seconds": 15.2
+    },
+    "lr0.003_seed0": {
+      "lr": 0.003,
+      "seed": 0,
+      "params": 22560,
+      "epochs_run": 100,
+      "min_train_mse": 0.03569,
+      "final_train_mse": 0.03959,
+      "best_val_mse": 0.64162,
+      "test_mse": 0.65107,
+      "test_mae": 0.68353,
+      "train_seconds": 15.5
+    },
+    "lr0.003_seed1": {
+      "lr": 0.003,
+      "seed": 1,
+      "params": 22560,
+      "epochs_run": 100,
+      "min_train_mse": 0.03328,
+      "final_train_mse": 0.03477,
+      "best_val_mse": 0.65854,
+      "test_mse": 0.65727,
+      "test_mae": 0.68375,
+      "train_seconds": 15.7
+    },
+    "best": {
+      "lr": 0.003,
+      "seed": 0,
+      "params": 22560,
+      "epochs_run": 100,
+      "min_train_mse": 0.03569,
+      "final_train_mse": 0.03959,
+      "best_val_mse": 0.64162,
+      "test_mse": 0.65107,
+      "test_mae": 0.68353,
+      "train_seconds": 15.5,
+      "config_key": "lr0.003_seed0"
+    }
+  }
+}

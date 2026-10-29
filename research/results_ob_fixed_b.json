@@ -1,0 +1,70 @@
+{
+  "config": {
+    "n_train": 300,
+    "n_val": 100,
+    "n_test": 100,
+    "seq": 64,
+    "horizon": 12,
+    "epochs": 100,
+    "batch": 64,
+    "patience": 100,
+    "lrs": [
+      0.01
+    ],
+    "seeds": [
+      0,
+      1
+    ],
+    "dim": 48,
+    "states": 24,
+    "hidden": 64,
+    "kernel": "stochastic",
+    "no_quant": false,
+    "amplitude": false,
+    "diff_input": false,
+    "models": "mmt",
+    "out": "research/results_ob_fixed_b.json"
+  },
+  "mean_predictor_val_mse": 0.56785,
+  "runs": {
+    "mmt": {
+      "lr0.01_seed0": {
+        "lr": 0.01,
+        "seed": 0,
+        "params": 47930,
+        "epochs_run": 100,
+        "min_train_mse": 0.26881,
+        "final_train_mse": 0.27199,
+        "best_val_mse": 0.31863,
+        "test_mse": 0.3122,
+        "test_mae": 0.45424,
+        "train_seconds": 87.1
+      },
+      "lr0.01_seed1": {
+        "lr": 0.01,
+        "seed": 1,
+        "params": 47930,
+        "epochs_run": 100,
+        "min_train_mse": 0.26711,
+        "final_train_mse": 0.27289,
+        "best_val_mse": 0.31562,
+        "test_mse": 0.32507,
+        "test_mae": 0.4576,
+        "train_seconds": 88.1
+      },
+      "best": {
+        "lr": 0.01,
+        "seed": 0,
+        "params": 47930,
+        "epochs_run": 100,
+        "min_train_mse": 0.26881,
+        "final_train_mse": 0.27199,
+        "best_val_mse": 0.31863,
+        "test_mse": 0.3122,
+        "test_mae": 0.45424,
+        "train_seconds": 87.1,
+        "config_key": "lr0.01_seed0"
+      }
+    }
+  }
+}

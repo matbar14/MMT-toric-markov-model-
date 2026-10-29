@@ -1,0 +1,36 @@
+{
+  "config": {
+    "task": "nonlinear",
+    "kick": "linear",
+    "kick_hidden": 64,
+    "dim": 48,
+    "n_train": 2500,
+    "n_val": 600,
+    "n_test": 600,
+    "seq": 64,
+    "horizon": 12,
+    "epochs": 30,
+    "batch": 64,
+    "lr": 0.003,
+    "patience": 5,
+    "lrs": "",
+    "seeds": "",
+    "kernel": "stochastic",
+    "states": 24,
+    "no_quant": false,
+    "amplitude": true,
+    "diff_input": true,
+    "seed": 0,
+    "out": "research/results_phase_rnn_nonlinear_linear.json"
+  },
+  "mean_predictor_val_mse": 1.30601,
+  "phase_rnn": {
+    "params": 12408,
+    "best_val_mse": 0.62048,
+    "test_mse": 0.63861,
+    "test_mae": 0.59801
+  },
+  "phase_readout_reference": {
+    "test_mse": 0.53108
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "config": {
+    "n_train": 2500,
+    "n_val": 600,
+    "n_test": 600,
+    "seq": 64,
+    "horizon": 12,
+    "regimes": 3,
+    "noise": 0.05,
+    "stickiness": 0.97,
+    "epochs": 30,
+    "batch": 64,
+    "lr": 0.002,
+    "patience": 5,
+    "dim": 48,
+    "states": 24,
+    "hidden": 64,
+    "kernel": "stochastic",
+    "no_quant": false,
+    "amplitude": true,
+    "diff_input": true,
+    "seed": 0,
+    "models": "gru",
+    "out": "research/results_nonlinear_fixed.json"
+  },
+  "models": {
+    "gru": {
+      "params": 15000,
+      "best_val_mse": 0.37572,
+      "test_mse": 0.35674,
+      "test_mae": 0.3654
+    }
+  }
+}

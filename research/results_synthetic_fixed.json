@@ -1,0 +1,40 @@
+{
+  "config": {
+    "n_train": 2500,
+    "n_val": 600,
+    "n_test": 600,
+    "seq": 64,
+    "horizon": 12,
+    "epochs": 6,
+    "batch": 64,
+    "lr": 0.002,
+    "patience": 2,
+    "dim": 48,
+    "states": 24,
+    "hidden": 64,
+    "speed_scale": 1.0,
+    "kernel": "stochastic",
+    "no_quant": false,
+    "amplitude": false,
+    "diff_input": false,
+    "curriculum": false,
+    "base_epochs": 10,
+    "seed": 0,
+    "models": "mmt,gru",
+    "out": "research/results_synthetic_fixed.json"
+  },
+  "models": {
+    "mmt": {
+      "params": 47930,
+      "best_val_mse": 0.38764,
+      "test_mse": 0.3852,
+      "test_mae": 0.51543
+    },
+    "gru": {
+      "params": 20448,
+      "best_val_mse": 0.11688,
+      "test_mse": 0.11697,
+      "test_mae": 0.24742
+    }
+  }
+}

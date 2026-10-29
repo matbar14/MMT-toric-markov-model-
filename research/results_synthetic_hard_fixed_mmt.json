@@ -1,0 +1,34 @@
+{
+  "config": {
+    "n_train": 2500,
+    "n_val": 600,
+    "n_test": 600,
+    "seq": 96,
+    "horizon": 24,
+    "epochs": 25,
+    "batch": 64,
+    "lr": 0.002,
+    "patience": 5,
+    "dim": 48,
+    "states": 24,
+    "hidden": 64,
+    "speed_scale": 2.0,
+    "kernel": "stochastic",
+    "no_quant": false,
+    "amplitude": false,
+    "diff_input": false,
+    "curriculum": false,
+    "base_epochs": 10,
+    "seed": 0,
+    "models": "mmt",
+    "out": "research/results_synthetic_hard_fixed_mmt.json"
+  },
+  "models": {
+    "mmt": {
+      "params": 57242,
+      "best_val_mse": 0.48656,
+      "test_mse": 0.48146,
+      "test_mae": 0.59044
+    }
+  }
+}

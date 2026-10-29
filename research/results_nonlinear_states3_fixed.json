@@ -1,0 +1,35 @@
+{
+  "config": {
+    "n_train": 2500,
+    "n_val": 600,
+    "n_test": 600,
+    "seq": 64,
+    "horizon": 12,
+    "regimes": 3,
+    "noise": 0.05,
+    "stickiness": 0.97,
+    "epochs": 30,
+    "batch": 64,
+    "lr": 0.002,
+    "patience": 5,
+    "dim": 48,
+    "states": 3,
+    "hidden": 64,
+    "kernel": "stochastic",
+    "no_quant": false,
+    "amplitude": true,
+    "diff_input": true,
+    "seed": 0,
+    "models": "mmt",
+    "out": "research/results_nonlinear_states3_fixed.json"
+  },
+  "models": {
+    "mmt": {
+      "params": 37430,
+      "best_val_mse": 0.42374,
+      "test_mse": 0.43628,
+      "test_mae": 0.45718,
+      "state_agreement_vs_true_regime": 0.3691
+    }
+  }
+}

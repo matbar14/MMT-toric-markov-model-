@@ -1,0 +1,72 @@
+{
+  "config": {
+    "n_train": 2500,
+    "n_val": 600,
+    "n_test": 600,
+    "seq": 64,
+    "horizon": 12,
+    "regimes": 3,
+    "noise": 0.05,
+    "stickiness": 0.97,
+    "epochs": 30,
+    "batch": 64,
+    "lr": 0.002,
+    "patience": 5,
+    "dim": 48,
+    "states": 3,
+    "kernel": "stochastic",
+    "no_quant": false,
+    "amplitude": true,
+    "diff_input": true,
+    "seed": 0,
+    "out": "research/results_probe_states3.json"
+  },
+  "mmt_head": {
+    "test_mse": 0.43628,
+    "test_mae": 0.45718,
+    "best_val_mse": 0.42374
+  },
+  "phase_readout_reference": {
+    "test_mse": 0.53108
+  },
+  "regime_probe": {
+    "model_own_argmax": 0.3633,
+    "chance": 0.3333,
+    "logistic_chain_probs": 0.4733,
+    "logistic_head_input": 0.97,
+    "logistic_phase_state": 0.9867,
+    "logistic_window": 0.3517
+  },
+  "phase_probe": {
+    "phase_state": {
+      "angle_err_rad": 0.0913,
+      "cos_sin_r2": 0.9687
+    },
+    "head_input": {
+      "angle_err_rad": 0.0797,
+      "cos_sin_r2": 0.9727
+    },
+    "window": {
+      "angle_err_rad": 0.0455,
+      "cos_sin_r2": 0.9916
+    }
+  },
+  "linear_readout_forecast": {
+    "phase_state": {
+      "train_mse": 0.36901,
+      "test_mse": 0.40019
+    },
+    "head_input": {
+      "train_mse": 0.33629,
+      "test_mse": 0.38029
+    },
+    "state_plus_probs": {
+      "train_mse": 0.33499,
+      "test_mse": 0.37968
+    },
+    "window": {
+      "train_mse": 0.36431,
+      "test_mse": 0.42368
+    }
+  }
+}

@@ -95,8 +95,13 @@ def simulate_regime_switching_oscillator(
     speed_scale: float = 1.0,
     amp_scale: float = 1.0,
     seed: int = 7,
-) -> tuple[np.ndarray, np.ndarray]:
+    return_theta: bool = False,
+) -> tuple[np.ndarray, ...]:
     """Simulate the regime-switching oscillator; returns x (N, len, 2), s (N, len).
+
+    With ``return_theta=True`` a third array (N, len) of the true underlying
+    phases theta_t (the exact values inside the observation readout) is
+    appended — used by the state-probe experiment as the regression target.
 
     ``stickiness`` trades off two failure modes of the task design.  At 0.9
     (mean sojourn 10 steps) windows contain ~6 regime switches and even the
@@ -120,9 +125,11 @@ def simulate_regime_switching_oscillator(
     states = torch.randint(num_regimes, (n_sequences,), generator=generator)
     obs = torch.empty(n_sequences, length, 2)
     states_history = torch.empty(n_sequences, length, dtype=torch.long)
+    theta_history = torch.empty(n_sequences, length)
 
     for t in range(length):
         states_history[:, t] = states
+        theta_history[:, t] = theta
         obs[:, t, 0] = amps[states] * torch.cos(theta) + noise_std * torch.randn(
             n_sequences, generator=generator
         )
@@ -133,6 +140,12 @@ def simulate_regime_switching_oscillator(
         states = torch.multinomial(rows, 1, generator=generator).squeeze(-1)
         theta = wrap(theta + omegas[states])
 
+    if return_theta:
+        return (
+            obs.numpy().astype(np.float32),
+            states_history.numpy(),
+            theta_history.numpy(),
+        )
     return obs.numpy().astype(np.float32), states_history.numpy()
 
 
@@ -163,6 +176,8 @@ def phase_readout_forecast(x: torch.Tensor, horizon: int, est_len: int = 8) -> t
 
 
 def build_model(name: str, num_features: int, seq_len: int, horizon: int, args) -> nn.Module:
+    # num_channels = data width: the 1-channel default broadcasts a single
+    # shared forecast across channels under mse_loss (the Round 1-3 bug).
     toric_kwargs = dict(
         dim_angles=args.dim,
         num_levels=2,
@@ -176,11 +191,12 @@ def build_model(name: str, num_features: int, seq_len: int, horizon: int, args) 
         n_bits=16 if args.no_quant else 8,
     )
     if name == "mmt":
-        return ToricForecaster(num_features, horizon, **toric_kwargs)
+        return ToricForecaster(num_features, horizon, num_channels=num_features,
+                               **toric_kwargs)
     if name == "gru":
         return RecurrentForecaster(
-            num_features, horizon, kind="gru",
-            hidden_dim=args.hidden, use_diff_input=args.diff_input,
+            num_features, horizon, num_channels=num_features,
+            kind="gru", hidden_dim=args.hidden, use_diff_input=args.diff_input,
         )
     if name == "mlp":
         return MLPForecaster(seq_len, horizon, num_channels=num_features,

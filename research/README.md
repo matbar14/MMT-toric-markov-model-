@@ -583,6 +583,73 @@ task (test ~0.65), and on the full regime task it reaches only 0.64–0.69
    overfit probe; with the corrected harness, the probe now measures what it
    was always meant to measure.
 
+## Round 4: plan and stop-loss (fixed before any run, per review)
+
+Constraints fixed before launch, as demanded by the review:
+
+- **Primary target is GRU's 0.3567** on the nonlinear task — not the toric
+  model's own 0.3878.  Beating ourselves is not the goal.
+- **Exactly 4 variants** on one shared differentiable rotation recurrence,
+  run as an ablation ladder; every result is reported, including failures.
+- **Home turf is the second gate**: the winner must also survive the task
+  family it was not designed on.
+- **The stop-loss below is fixed before launch**: no budget extensions, no
+  post-hoc lr sweeps, no mid-flight architecture tweaks.
+- **Rotation stays SO(2)**: the state lives on `(S^1)^d` and every transition
+  is complex multiplication `exp(i * angle)`.  No quaternion (S^3)
+  parameterization anywhere.
+
+Shared base of all variants (the Round 3.5 control-2 recurrence):
+
+`h_{t+1} = normalize(h_t * exp(i * (theta_base + f(x_t))))`, `h_0 = 1`,
+
+`f` = 2-layer MLP kick, then the same fusion + linear head + amplitude
+bypass + diff inputs.  The toric machinery is grafted back in pieces:
+
+| variant | chain | geodesic gate | attention |
+|---------|:-----:|:-------------:|:---------:|
+| `rot` (reference) | – | – | – |
+| `chain` | + | – | – |
+| `gate` | – | + | – |
+| `chain_gate` | + | + | – |
+| `full` | + | + | + |
+
+- **chain**: `ToricMarkovChain` (stochastic kernel, K=8) driven by the raw
+  diff features; its posterior adds per-state kick offsets
+  `state_theta[K, D]` to the rotation — the differentiable replacement of
+  the toric state-selected kicks (`theta` init N(0, 0.5^2), as in the toric
+  layer).
+- **gate**: `g_t = sigmoid(Linear(x_t))` per angle dimension; the update
+  becomes the torus geodesic slerp
+  `normalize(g * h_rotated + (1 - g) * h_old)` — the toric gate made
+  input-conditioned and per-dimension.
+- **attention**: per-dimension pull toward a learned context phase (the
+  toric attention minus quantization).
+
+Fixed protocol, identical to the Round 3.5 tables: nonlinear task
+2,500/600/600, T=64 H=12, 3 regimes, 30 epochs, patience 5, lr 2e-3,
+batch 64, diff-input, amplitude, seed 0 then seed 1.  Home turf: easy =
+6 epochs / patience 2 / plain features; hard = 25 epochs / patience 5 /
+speed x2, T=96 H=24 / plain features (both exactly the protocols that
+produced the reference numbers).
+
+**Stop-loss (fixed):**
+
+1. Pre-flight: the `full` variant must fit the 300-sequence probe to min
+   train MSE < 0.10 within the 100-epoch budget.  Fail => nothing launches.
+2. After seed 0 for all 5 configs (4 variants + reference, one fixed lr):
+   if best test MSE > 0.388 (old MMT) => **STOP** — the direction is closed
+   in its current form; no seed 1, no tuning, documented as failed.
+3. If 0.357 < best <= 0.388: seed 1 runs for the best variant only
+   (stability check); the verdict is "machinery helps but misses the
+   target" regardless of the confirmation outcome.
+4. If best <= 0.357: seed 1 for the best two variants; the winner (selected
+   on **val**, never on test) goes to the home-turf gate.
+5. Secondary gate: **pass** = beats old MMT on both home-turf tasks
+   (0.3852 easy, 0.4815 hard); **strong pass** = within 1.5x GRU
+   (easy <= 0.176, hard <= 0.393); failure on either task => the machinery
+   is task-specific and is reported as such.
+
 ## Reproduce
 
 ```bash
